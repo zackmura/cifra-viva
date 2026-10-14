@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Cifra Viva</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🎸 Cifra Viva</div>
+    <select id="songSelect" aria-label="Escolher música"></select>
+    <div class="topbar-actions">
+      <button id="btnNew" type="button">+ Nova</button>
+      <button id="btnEdit" type="button">Editar</button>
+      <button id="btnDelete" type="button" class="danger">Excluir</button>
+    </div>
+  </header>
+
+  <div class="toolbar" id="toolbar">
+    <div class="group modes">
+      <button id="btnListen" type="button" class="primary big">🎤 <span class="long">Ouvir violão</span><span class="short">Ouvir</span></button>
+      <button id="btnVirtual" type="button" class="big">🎸 <span class="long">Violão virtual</span><span class="short">Virtual</span></button>
+      <button id="btnAuto" type="button" class="big">▶ <span class="long">Rolagem</span><span class="short">Rolar</span></button>
+      <button id="btnSettings" type="button" class="big settings-toggle" aria-expanded="false" title="Ajustes">⚙</button>
+    </div>
+
+    <div class="group monitor" id="monitor" hidden>
+      <div class="heard"><span class="label">Ouvindo</span><strong id="heardChord">–</strong></div>
+      <div class="chroma" id="chroma"></div>
+      <div class="level"><div id="levelBar"></div></div>
+    </div>
+
+    <div class="settings" id="settings">
+      <label class="field">Sensibilidade
+        <input id="sensitivity" type="range" min="1" max="10" value="5">
+      </label>
+      <label class="field" id="speedField">Velocidade
+        <input id="speed" type="range" min="5" max="120" value="30">
+      </label>
+      <div class="group">
+        <span class="label">Tom</span>
+        <button id="btnTDown" type="button" title="Abaixar meio tom">−</button>
+        <span id="transposeLabel" class="pill">0</span>
+        <button id="btnTUp" type="button" title="Subir meio tom">+</button>
+      </div>
+      <div class="group">
+        <span class="label">Letra</span>
+        <button id="btnFontDown" type="button" title="Diminuir letra">A−</button>
+        <button id="btnFontUp" type="button" title="Aumentar letra">A+</button>
+        <button id="btnRestart" type="button" title="Voltar ao primeiro acorde">⏮ Início</button>
+      </div>
+    </div>
+  </div>
+
+  <p class="status" id="status">Escolha uma música e toque no <b>violão de verdade</b> (🎤) ou no <b>violão virtual</b> (🎸). Toque em qualquer acorde da letra para pular para ele.</p>
+
+  <main class="song">
+    <h1 id="songTitle"></h1>
+    <p class="artist" id="songArtist"></p>
+    <section class="chords-section">
+      <h2>Acordes <span class="label">toque no desenho para ouvir · ‹ › outras formas</span></h2>
+      <div class="chord-panel" id="chordPanel"></div>
+    </section>
+    <div class="sheet" id="sheet"></div>
+    <div class="end-spacer"></div>
+  </main>
+
+  <div class="chord-tip" id="chordTip" hidden></div>
+
+  <aside class="dock" id="dock" hidden>
+    <div class="dock-head">
+      <span id="dockHint" class="dock-hint"></span>
+      <button type="button" id="dockClose" aria-label="Fechar violão virtual">✕</button>
+    </div>
+    <div class="guitar" id="guitar"></div>
+    <div class="dock-chords" id="dockChords"></div>
+  </aside>
+
+  <dialog id="editor">
+    <form method="dialog" id="editorForm">
+      <h2 id="editorHeading">Nova cifra</h2>
+      <label>Título <input id="edTitle" required></label>
+      <label>Artista <input id="edArtist"></label>
+      <label>Cifra
+        <textarea id="edText" rows="16" spellcheck="false" placeholder="Cole aqui a cifra.
+
+Formato 1 – acordes acima da letra:
+G              D
+Saio cedo pela estrada
+
+Formato 2 – acordes entre colchetes:
+[G]Saio cedo pela [D]estrada
+
+Seções: [Refrão], [Intro] G D Em C"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button value="cancel" type="button" id="edCancel">Cancelar</button>
+        <button value="save" class="primary" id="edSave">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- cifra-viva.js é gerado por "node build.js" a partir dos arquivos em js/ -->
+  <script src="cifra-viva.js"></script>
+</body>
+</html>

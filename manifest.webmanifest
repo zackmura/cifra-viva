@@ -1,0 +1,12 @@
+{
+  "name": "Cifra Viva",
+  "short_name": "Cifra Viva",
+  "description": "Cifras que rolam sozinhas acompanhando o seu violão.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#15171a",
+  "theme_color": "#0f766e",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
