@@ -18,8 +18,8 @@ Site de cifras que **escuta o seu violão** e rola a letra sozinho conforme voc�
 - **Conta e sincronização** entre celular e computador (PHP + MySQL na Hostinger).
 
 ## Como abrir
-- **Mais fácil:** dê dois cliques em  (conta/sincronização só funcionam publicado).
-- **Servidor local:**  e abra http://localhost:5173
+- **Mais fácil:** dê dois cliques em `index.html` (conta/sincronização só funcionam publicado).
+- **Servidor local:** `node server.js` e abra http://localhost:5173
 - **Hostinger:** veja [HOSTINGER.md](HOSTINGER.md).
 
 ## Formato das cifras
