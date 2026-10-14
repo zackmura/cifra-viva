@@ -320,88 +320,109 @@ function cosine(a, b) {
 }
 
 // ===== js/follower.js =====
-// Acompanha em que acorde da música você está. Só compara o som com o acorde
-// atual e os próximos (e não com todos os acordes do mundo), o que deixa a
-// detecção bem mais robusta do que tentar "adivinhar" o acorde do zero.
+// Acompanha a música como um jogo (estilo Guitar Hero):
+//  - "alvo" é o acorde que você precisa tocar agora;
+//  - acertou o alvo  -> 'hit'   (a música anda)
+//  - repetiu o acorde que já está tocando (ritmo) -> 'strum' (nada anda)
+//  - tocou outro acorde -> 'miss' (nada anda)
+// Acordes iguais seguidos na cifra (C ... C) contam como um só: você só continua batendo.
 
 
 class Follower {
-  constructor(events, onMove) {
+  constructor(events, onEvent) {
     this.events = events; // [{name, tpl}]
-    this.onMove = onMove;
-    this.allowSkip = true; // aceitar pular um acorde (útil no violão real, desligado no virtual)
-    // todos os acordes "concorrentes": se o som parece mais com outro acorde, não avança
+    this.onEvent = onEvent;
+    this.pos = 0; // acorde que está tocando (ou o primeiro, antes de começar)
+    this.started = false; // já tocou o primeiro acorde?
+    this.evidence = 0;
+    this.env = 0; // envelope de volume, para perceber cada batida
+    this.lastOnset = 0;
+    this.onset = null;
     const seen = new Set();
-    this.rivals = [...COMMON_CHORDS, ...events].filter((c) => !seen.has(c.name) && seen.add(c.name)).map((c) => c.tpl);
-    this.pos = 0;
-    this.enteredAt = performance.now();
-    this.avgDur = 2200; // duração média de um acorde (ms), aprendida enquanto você toca
-    this.evidence = [0, 0];
+    this.rivals = [...COMMON_CHORDS, ...events].filter((c) => !seen.has(c.name) && seen.add(c.name));
     this.setSensitivity(5);
   }
 
   /** 1 (cauteloso) a 10 (muito sensível). */
   setSensitivity(s) {
-    this.margin = 0.13 - s * 0.011; // quanto o próximo acorde precisa "ganhar" do atual
-    this.needFrames = Math.round(9 - s * 0.6); // por quantos quadros de 50 ms seguidos
+    this.margin = 0.13 - s * 0.011; // quanto o alvo precisa "ganhar" do acorde atual
+    this.needFrames = Math.round(9 - s * 0.6); // por quantos quadros de 50 ms
     this.minSim = 0.62 - s * 0.012;
-  }
-
-  setPosition(i) {
-    this.pos = Math.max(0, Math.min(this.events.length - 1, i));
-    this.enteredAt = performance.now();
-    this.evidence = [0, 0];
-    this.onMove(this.pos, 'manual');
   }
 
   similar(a, b) {
     return cosine(a.tpl, b.tpl) > 0.9; // ex.: C e C7M, G e G/B
   }
 
-  update(chroma, now) {
+  /** Próximo acorde DIFERENTE depois de i (pula repetições como C ... C). -1 no fim. */
+  nextIndex(i = this.pos) {
     const ev = this.events;
-    const cur = ev[this.pos];
-    const n1 = ev[this.pos + 1];
-    if (!cur || !n1) return null;
-    const n2 = ev[this.pos + 2];
-    const sCur = cosine(chroma, cur.tpl);
-
-    // Mesmo acorde repetido (C ... C): não dá para ouvir a troca, então
-    // avançamos pelo tempo médio que você costuma ficar em cada acorde.
-    if (this.similar(cur, n1)) {
-      if (now - this.enteredAt > this.avgDur && sCur > this.minSim) this.advance(1, now, false);
-      return { sCur, s1: sCur, s2: 0 };
-    }
-
-    const s1 = cosine(chroma, n1.tpl);
-    const canSkip = this.allowSkip && n2 && !this.similar(n1, n2) && !this.similar(cur, n2);
-    const s2 = canSkip ? cosine(chroma, n2.tpl) : -1;
-    const best = s2 > s1 + 0.08 ? 1 : 0;
-    const sBest = best ? s2 : s1;
-    let sAll = 0;
-    for (const t of this.rivals) sAll = Math.max(sAll, cosine(chroma, t));
-
-    if (sBest > this.minSim && sBest > sCur + this.margin && sBest >= sAll - 0.04) {
-      this.evidence[best]++;
-      this.evidence[1 - best] = Math.max(0, this.evidence[1 - best] - 1);
-    } else {
-      this.evidence[0] = Math.max(0, this.evidence[0] - 1);
-      this.evidence[1] = Math.max(0, this.evidence[1] - 1);
-    }
-
-    // Pular um acorde (porque você foi rápido ou ele foi mal detectado) exige mais certeza.
-    const need = best ? this.needFrames * 3 : this.needFrames;
-    if (this.evidence[best] >= need) this.advance(best + 1, now, true);
-    return { sCur, s1, s2 };
+    let j = i + 1;
+    while (j < ev.length && this.similar(ev[j], ev[i])) j++;
+    return j < ev.length ? j : -1;
   }
 
-  advance(steps, now, learn) {
-    const dur = (now - this.enteredAt) / steps;
-    if (learn && dur > 300 && dur < 12000) this.avgDur = this.avgDur * 0.7 + dur * 0.3;
-    this.pos = Math.min(this.events.length - 1, this.pos + steps);
-    this.enteredAt = now;
-    this.evidence = [0, 0];
-    this.onMove(this.pos, 'audio');
+  /** Índice do acorde que você precisa tocar agora. */
+  target() {
+    return this.started ? this.nextIndex() : this.pos;
+  }
+
+  setPosition(i) {
+    this.pos = Math.max(0, Math.min(this.events.length - 1, i));
+    this.started = false;
+    this.evidence = 0;
+    this.onset = null;
+    this.onEvent({ type: 'move', pos: this.pos });
+  }
+
+  bestRival(chroma) {
+    let best = null;
+    let s = 0;
+    for (const r of this.rivals) {
+      const v = cosine(chroma, r.tpl);
+      if (v > s) { s = v; best = r; }
+    }
+    return { chord: best, s };
+  }
+
+  update(chroma, rms, now, noise) {
+    // cada batida nas cordas é um salto de volume
+    if (rms > noise * 1.5 && rms > this.env * 1.5 && now - this.lastOnset > 150) {
+      this.lastOnset = now;
+      this.onset = { frames: 0, decided: false };
+    }
+    this.env = Math.max(rms, this.env * 0.85);
+    if (rms <= noise) { this.evidence = 0; return; }
+
+    const ev = this.events;
+    const ti = this.target();
+    const tgt = ti >= 0 ? ev[ti] : null;
+    const cur = this.started ? ev[this.pos] : null;
+    const sT = tgt ? cosine(chroma, tgt.tpl) : 0;
+    const sC = cur ? cosine(chroma, cur.tpl) : 0;
+    const best = this.bestRival(chroma);
+
+    // acertou o alvo: parece mais com ele do que com o acorde atual e com qualquer outro
+    const hitting = tgt && sT > this.minSim && sT > sC + this.margin && sT >= best.s - 0.04;
+    this.evidence = hitting ? this.evidence + 1 : Math.max(0, this.evidence - 1);
+    if (this.evidence >= this.needFrames) {
+      if (this.started) this.pos = ti;
+      this.started = true;
+      this.evidence = 0;
+      if (this.onset) this.onset.decided = true;
+      this.onEvent({ type: 'hit', pos: this.pos });
+      return;
+    }
+
+    // a batida não foi o alvo: foi o mesmo acorde de antes (ritmo) ou um erro?
+    if (this.onset && !this.onset.decided && ++this.onset.frames >= this.needFrames + 3) {
+      this.onset.decided = true;
+      if (cur && sC > this.minSim && sC >= best.s - 0.05) {
+        this.onEvent({ type: 'strum', pos: this.pos });
+      } else if (best.chord && best.s > this.minSim && !(tgt && cosine(best.chord.tpl, tgt.tpl) > 0.9)) {
+        this.onEvent({ type: 'miss', heard: best.chord.name, expected: tgt?.name || null });
+      }
+    }
   }
 }
 
@@ -722,50 +743,77 @@ class VirtualGuitar {
 }
 
 // ===== js/guitarview.js =====
-// Desenho do violão (deitado, braço à esquerda). As cordas vibram ao tocar e o
-// braço mostra onde colocar os dedos do acorde.
+// Braço do violão (visto de frente, mão do acorde à esquerda). Mostra onde ficam os
+// dedos do acorde e as cordas vibram a cada batida.
 
-const NUT = 70; // x da pestana do braço
-const FW = 58; // largura de cada casa
-const FRETS = 5; // casas visíveis
-const BRIDGE = 566;
-const SY = (s) => 46 + s * 13.6; // y de cada corda (6ª corda em cima, como você vê olhando para o violão)
-const CX = (f, start) => NUT + FW * (f - start + 0.5);
+const NUT = 74; // x da pestana do braço (osso)
+const WIDTHS = [128, 120, 113, 106, 100]; // casas ficam mais estreitas, como no violão de verdade
+const FRETS = WIDTHS.length;
+const W = 700;
+const TOP = 22;
+const BOTTOM = 148;
+const SY = (s) => TOP + 13 + s * 20; // 6ª corda (mais grave) em cima, como você vê olhando para o braço
 
-function guitarSVG() {
-  const strings = [0, 1, 2, 3, 4, 5].map((s) =>
-    `<line class="gv-string" data-s="${s}" x1="22" x2="${BRIDGE}" y1="${SY(s)}" y2="${SY(s)}" stroke-width="${2.6 - s * 0.32}"/>`).join('');
-  const frets = Array.from({ length: FRETS }, (_, i) =>
-    `<line x1="${NUT + FW * (i + 1)}" x2="${NUT + FW * (i + 1)}" y1="36" y2="124" class="gv-fret"/>`).join('');
-  const pegs = [0, 1, 2].map((i) => `<circle cx="${14 + i * 17}" cy="27" r="5.5" class="gv-peg"/><circle cx="${14 + i * 17}" cy="133" r="5.5" class="gv-peg"/>`).join('');
+function fretX(k) {
+  let x = NUT;
+  for (let i = 0; i < k; i++) x += WIDTHS[i];
+  return x;
+}
+const CX = (f, start) => (fretX(f - start) + fretX(f - start + 1)) / 2;
+
+function neckSVG() {
+  const frets = Array.from({ length: FRETS }, (_, i) => {
+    const x = fretX(i + 1);
+    return `<rect x="${x - 2.5}" y="${TOP}" width="5" height="${BOTTOM - TOP}" fill="url(#gv-fretwire)"/>`;
+  }).join('');
+  const strings = [0, 1, 2, 3, 4, 5].map((s) => {
+    const w = 3.4 - s * 0.42;
+    return `<line class="gv-shadow" x1="58" x2="${W}" y1="${SY(s) + 2.2}" y2="${SY(s) + 2.2}" stroke-width="${w}"/>`
+      + `<line class="gv-string ${s < 3 ? 'wound' : 'plain'}" x1="40" x2="${W}" y1="${SY(s)}" y2="${SY(s)}" stroke-width="${w}"/>`;
+  }).join('');
+  const pegs = [0, 1, 2].map((i) => `<ellipse cx="${16 + i * 17}" cy="9" rx="6" ry="5" class="gv-peg"/><ellipse cx="${16 + i * 17}" cy="161" rx="6" ry="5" class="gv-peg"/>`).join('');
   return `
-<svg viewBox="0 0 640 160" class="gv" role="img" aria-label="Violão">
-  <path class="gv-body" d="M350,24 C385,8 450,12 472,32 C492,48 522,0 592,2 C652,6 652,154 592,158 C522,160 492,112 472,128 C450,148 385,152 350,136 Z"/>
-  <circle cx="440" cy="80" r="34" class="gv-rosette"/>
-  <circle cx="440" cy="80" r="27" class="gv-hole"/>
-  <rect x="${BRIDGE - 8}" y="40" width="20" height="80" rx="4" class="gv-bridge"/>
-  <path class="gv-head" d="M4,30 L${NUT - 6},36 L${NUT - 6},124 L4,130 Q-2,80 4,30 Z"/>
+<svg viewBox="0 0 ${W} 172" class="gv" role="img" aria-label="Braço do violão">
+  <defs>
+    <linearGradient id="gv-wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#24150c"/><stop offset=".18" stop-color="#3f2717"/>
+      <stop offset=".5" stop-color="#4b2f1c"/><stop offset=".82" stop-color="#3f2717"/><stop offset="1" stop-color="#24150c"/>
+    </linearGradient>
+    <linearGradient id="gv-headwood" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2a180d"/><stop offset="1" stop-color="#4a2c18"/>
+    </linearGradient>
+    <linearGradient id="gv-fretwire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8d8d8d"/><stop offset=".45" stop-color="#f4f4f4"/><stop offset="1" stop-color="#9a9a9a"/>
+    </linearGradient>
+    <radialGradient id="gv-pearl" cx=".35" cy=".35" r=".8">
+      <stop offset="0" stop-color="#ffffff"/><stop offset=".6" stop-color="#e6ddcf"/><stop offset="1" stop-color="#b9ae9c"/>
+    </radialGradient>
+    <linearGradient id="gv-bone" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d9cdb6"/><stop offset=".5" stop-color="#fbf5e8"/><stop offset="1" stop-color="#d4c7ae"/>
+    </linearGradient>
+  </defs>
+  <path d="M2,14 Q30,2 ${NUT - 6},${TOP - 4} L${NUT - 6},${BOTTOM + 4} Q30,168 2,156 Q-4,85 2,14 Z" fill="url(#gv-headwood)"/>
   ${pegs}
-  <rect x="${NUT}" y="36" width="${FW * FRETS + 12}" height="88" class="gv-board"/>
-  <rect x="${NUT - 6}" y="36" width="6" height="88" class="gv-nut"/>
-  ${frets}
+  <rect x="${NUT - 6}" y="${TOP - 4}" width="${W - NUT + 6}" height="${BOTTOM - TOP + 8}" fill="#1b0f08"/>
+  <rect x="${NUT}" y="${TOP}" width="${W - NUT}" height="${BOTTOM - TOP}" fill="url(#gv-wood)"/>
   <g id="gv-inlays"></g>
+  ${frets}
+  <rect x="${NUT - 7}" y="${TOP - 3}" width="8" height="${BOTTOM - TOP + 6}" rx="1.5" fill="url(#gv-bone)"/>
   <g class="gv-strings">${strings}</g>
   <g id="gv-marks"></g>
   <g id="gv-fingers"></g>
-  <text id="gv-pos" x="${NUT + FW / 2}" y="148" text-anchor="middle" class="gv-pos"></text>
-  <rect x="0" y="0" width="640" height="160" fill="transparent" class="gv-hit"/>
+  <g id="gv-numbers"></g>
 </svg>`;
 }
 
 class GuitarView {
   constructor(container, onTap) {
-    container.innerHTML = guitarSVG();
+    container.innerHTML = neckSVG();
     this.svg = container.querySelector('svg');
     this.fingers = this.svg.querySelector('#gv-fingers');
     this.marks = this.svg.querySelector('#gv-marks');
     this.inlays = this.svg.querySelector('#gv-inlays');
-    this.pos = this.svg.querySelector('#gv-pos');
+    this.numbers = this.svg.querySelector('#gv-numbers');
     this.strings = [...this.svg.querySelectorAll('.gv-string')];
     this.svg.addEventListener('pointerdown', (e) => { e.preventDefault(); onTap?.(); });
   }
@@ -778,27 +826,32 @@ class GuitarView {
     const pressed = v.frets.filter((f) => f > 0);
     const maxF = pressed.length ? Math.max(...pressed) : 0;
     const start = maxF <= FRETS ? 1 : Math.min(...pressed);
-    this.pos.textContent = start > 1 ? `${start}ª casa` : '';
-    this.inlays.innerHTML = [3, 5, 7, 9, 12].filter((f) => f >= start && f < start + FRETS)
-      .map((f) => `<circle cx="${CX(f, start)}" cy="80" r="${f === 12 ? 4 : 5}" class="gv-inlay"/>`).join('');
+
+    const mid = (TOP + BOTTOM) / 2;
+    this.inlays.innerHTML = [3, 5, 7, 9, 12, 15].filter((f) => f >= start && f < start + FRETS).map((f) => (f === 12
+      ? `<circle cx="${CX(f, start)}" cy="${mid - 26}" r="6" fill="url(#gv-pearl)"/><circle cx="${CX(f, start)}" cy="${mid + 26}" r="6" fill="url(#gv-pearl)"/>`
+      : `<circle cx="${CX(f, start)}" cy="${mid}" r="7" fill="url(#gv-pearl)"/>`)).join('');
+    this.numbers.innerHTML = Array.from({ length: FRETS }, (_, i) =>
+      `<text x="${CX(start + i, start)}" y="${BOTTOM + 19}" text-anchor="middle" class="gv-num">${start + i}</text>`).join('');
 
     const out = [];
     v.frets.forEach((f, s) => {
-      if (f < 0) out.push(`<text x="${NUT - 15}" y="${SY(s) + 4}" text-anchor="middle" class="gv-mute">✕</text>`);
-      if (f === 0) out.push(`<circle cx="${NUT - 15}" cy="${SY(s)}" r="4.5" class="gv-open"/>`);
+      if (f < 0) out.push(`<text x="${NUT - 26}" y="${SY(s) + 5}" text-anchor="middle" class="gv-mute">✕</text>`);
+      if (f === 0) out.push(`<circle cx="${NUT - 26}" cy="${SY(s)}" r="6" class="gv-open"/>`);
     });
     this.marks.innerHTML = out.join('');
 
     const dots = [];
     if (v.barre) {
       const b = v.barre;
-      dots.push(`<rect x="${CX(b.fret, start) - 9}" y="${SY(b.from) - 9}" width="18" height="${SY(b.to) - SY(b.from) + 18}" rx="9" class="gv-dot"/>`);
-      dots.push(`<text x="${CX(b.fret, start)}" y="${SY(b.from) + 4}" text-anchor="middle" class="gv-finger">1</text>`);
+      const x = CX(b.fret, start);
+      dots.push(`<rect x="${x - 12}" y="${SY(b.from) - 12}" width="24" height="${SY(b.to) - SY(b.from) + 24}" rx="12" class="gv-dot"/>`);
+      dots.push(`<text x="${x}" y="${SY(b.from) + 5}" text-anchor="middle" class="gv-finger">1</text>`);
     }
     v.frets.forEach((f, s) => {
       if (f <= 0 || (v.barre && f === v.barre.fret && s >= v.barre.from && s <= v.barre.to)) return;
-      dots.push(`<circle cx="${CX(f, start)}" cy="${SY(s)}" r="8.5" class="gv-dot"/>`);
-      if (v.fingers[s]) dots.push(`<text x="${CX(f, start)}" y="${SY(s) + 4}" text-anchor="middle" class="gv-finger">${v.fingers[s]}</text>`);
+      dots.push(`<circle cx="${CX(f, start)}" cy="${SY(s)}" r="12" class="gv-dot"/>`);
+      if (v.fingers[s]) dots.push(`<text x="${CX(f, start)}" y="${SY(s) + 5}" text-anchor="middle" class="gv-finger">${v.fingers[s]}</text>`);
     });
     this.fingers.innerHTML = dots.join('');
   }
@@ -836,6 +889,7 @@ const state = {
   vguitar: null, // violão virtual ligado ao detector
   preview: null, // violão só para ouvir o acorde (fora do modo virtual)
   voicing: {}, // acorde -> índice da variação escolhida
+  score: { hits: 0, misses: 0, combo: 0, best: 0, strums: 0 },
 };
 
 // ---------- armazenamento ----------
@@ -905,15 +959,16 @@ function renderSheet() {
   $('#songArtist').textContent = state.song.artist || '';
   $('#transposeLabel').textContent = state.transpose > 0 ? '+' + state.transpose : String(state.transpose);
 
-  const pos = state.follower ? Math.min(state.follower.pos, state.events.length - 1) : 0;
-  const sens = +$('#sensitivity').value;
-  state.follower = new Follower(state.events, onMove);
-  state.follower.setSensitivity(sens);
-  state.follower.pos = Math.max(0, pos);
-  state.follower.allowSkip = state.mode !== 'virtual';
+  const old = state.follower;
+  state.follower = new Follower(state.events, onFollowEvent);
+  state.follower.setSensitivity(+$('#sensitivity').value);
+  if (old) {
+    state.follower.pos = Math.max(0, Math.min(old.pos, state.events.length - 1));
+    state.follower.started = old.started;
+  }
   renderChordPanel();
   renderDock();
-  highlight(state.follower.pos, false);
+  highlight(false);
 }
 
 // ---------- desenhos dos acordes ----------
@@ -955,7 +1010,7 @@ function changeVoicing(name, delta) {
   state.voicing[name] = (i + delta + list.length) % list.length;
   renderChordPanel();
   renderDock();
-  highlight(state.follower.pos, false);
+  highlight(false);
   strum(name);
 }
 
@@ -1023,37 +1078,117 @@ function renderDock() {
   });
 }
 
-function updateDockHints(i) {
-  const cur = state.events[i]?.name;
-  const next = state.events[i + 1]?.name;
-  document.querySelectorAll('#dock .dock-chord').forEach((b) => {
-    b.classList.toggle('is-current', b.dataset.chord === cur);
-    b.classList.toggle('is-next', b.dataset.chord === next && next !== cur);
-  });
-  // o braço do violão já mostra a posição do PRÓXIMO acorde, para você se preparar
-  const show = next || cur;
-  guitarView.showChord(show && currentVoicing(show).v);
-  $('#dockHint').innerHTML = next
-    ? `Agora <b>${cur}</b> · próximo <b class="hint-next">${next}</b> <span class="label">(dedos no braço)</span>`
-    : `Último acorde: <b>${cur || '–'}</b>`;
+// ---------- jogo: pista de acordes, placar e avisos ----------
+function playing() {
+  const f = state.follower;
+  return f.started ? state.events[f.pos] : null;
+}
+function targetEvent() {
+  const ti = state.follower.target();
+  return ti >= 0 ? state.events[ti] : null;
 }
 
-function highlight(i, scroll = true) {
-  document.querySelectorAll('.ch.current, .ch.next').forEach((e) => e.classList.remove('current', 'next'));
+/** Pista estilo Guitar Hero: o acorde que está tocando e os próximos que vêm aí. */
+function renderLane(advance = false) {
+  const f = state.follower;
+  const lane = $('#lane');
+  const items = [];
+  let i = f.pos;
+  while (i >= 0 && items.length < 7) { items.push(i); i = f.nextIndex(i); }
+  lane.innerHTML = items.map((idx, k) => {
+    const name = state.events[idx].name;
+    let cls = 'lane-chip';
+    let extra = '';
+    if (k === 0 && f.started) {
+      cls += ' playing';
+      if (state.score.strums > 1) extra = `<small>×${state.score.strums}</small>`;
+    } else if ((k === 0 && !f.started) || (k === 1 && f.started)) {
+      cls += ' target';
+    }
+    return `<span class="${cls}">${name}${extra}</span>`;
+  }).join('') + (i < 0 && items.length < 7 ? '<span class="lane-chip end">🏁</span>' : '');
+  if (advance) { lane.classList.remove('advance'); void lane.offsetWidth; lane.classList.add('advance'); }
+}
+
+function renderScore() {
+  const s = state.score;
+  const total = s.hits + s.misses;
+  $('#score').innerHTML = `<span class="ok">✓ ${s.hits}</span><span class="bad">✗ ${s.misses}</span>`
+    + `<span class="combo${s.combo >= 5 ? ' hot' : ''}">🔥 ${s.combo}</span>`
+    + (total ? `<span class="acc">${Math.round((s.hits / total) * 100)}%</span>` : '');
+}
+
+function resetScore() {
+  Object.assign(state.score, { hits: 0, misses: 0, combo: 0, best: 0, strums: 0 });
+}
+
+let feedbackTimer = 0;
+function feedback(html, kind) {
+  const el = $('#feedback');
+  el.innerHTML = html;
+  el.className = 'feedback ' + kind;
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(feedbackTimer);
+  feedbackTimer = setTimeout(() => el.classList.remove('show'), 1100);
+}
+
+function updateGame() {
+  const cur = playing();
+  const tgt = targetEvent();
+  // o braço mostra o acorde que você ESTÁ tocando; só muda quando você acerta o próximo
+  const show = cur || tgt;
+  guitarView.showChord(show && currentVoicing(show.name).v);
+  document.querySelectorAll('#dock .dock-chord').forEach((b) => {
+    b.classList.toggle('is-current', !!cur && b.dataset.chord === cur.name);
+    b.classList.toggle('is-next', !!tgt && b.dataset.chord === tgt.name);
+  });
+  $('#dockHint').innerHTML = !cur
+    ? `Toque <b class="hint-next">${tgt?.name}</b> para começar`
+    : tgt
+      ? `Tocando <b>${cur.name}</b> · troque para <b class="hint-next">${tgt.name}</b>`
+      : 'Último acorde — termine a música! 🎉';
+  renderLane();
+  renderScore();
+}
+
+function highlight(scroll = true) {
+  document.querySelectorAll('.ch.current, .ch.next, .ch.waiting').forEach((e) => e.classList.remove('current', 'next', 'waiting'));
   document.querySelectorAll('.row.current, .row.past').forEach((e) => e.classList.remove('current', 'past'));
-  const ev = state.events[i];
+  const f = state.follower;
+  const ev = state.events[f.pos];
   if (!ev) return;
-  ev.el.classList.add('current');
-  state.events[i + 1]?.el.classList.add('next');
+  ev.el.classList.add(f.started ? 'current' : 'waiting');
+  if (f.started) targetEvent()?.el.classList.add('next');
   ev.row.classList.add('current');
-  updateDockHints(i);
   let r = ev.row.previousElementSibling;
   while (r) { r.classList.add('past'); r = r.previousElementSibling; }
+  updateGame();
   if (scroll) scrollToRow(ev.row);
 }
 
-function onMove(i) {
-  highlight(i);
+function onFollowEvent(e) {
+  const s = state.score;
+  if (e.type === 'hit') {
+    s.hits++;
+    s.combo++;
+    s.best = Math.max(s.best, s.combo);
+    s.strums = 1;
+    feedback(s.combo >= 5 && s.combo % 5 === 0 ? `🔥 ${s.combo} seguidos!` : '✓', 'ok');
+    highlight(true);
+    renderLane(true);
+  } else if (e.type === 'strum') {
+    s.strums++; // batendo o mesmo acorde no ritmo: nada anda
+    renderLane();
+  } else if (e.type === 'miss') {
+    s.misses++;
+    s.combo = 0;
+    feedback(`✗ ${e.heard}${e.expected ? ` <small>era ${e.expected}</small>` : ''}`, 'bad');
+    renderScore();
+  } else if (e.type === 'move') {
+    s.strums = 0;
+    highlight(true);
+  }
 }
 
 // ---------- rolagem suave ----------
@@ -1107,7 +1242,7 @@ function onAudioFrame({ chroma, rms, time }) {
     if (state.calib.length >= 20) {
       const avg = state.calib.reduce((a, b) => a + b, 0) / state.calib.length;
       state.noise = Math.max(0.004, avg * 2.5);
-      setStatus('Pode tocar! Toque o <b>primeiro acorde</b> destacado e siga a música. Se ele se perder, clique no acorde certo.');
+      setStatus('Pode tocar! Comece pelo acorde destacado e bata no ritmo que quiser; a letra anda quando você troca para o acorde certo. Se ele se perder, toque no acorde certo da letra.');
     }
     return;
   }
@@ -1117,7 +1252,9 @@ function onAudioFrame({ chroma, rms, time }) {
   lvl.style.height = Math.min(100, (rms / (state.noise * 4)) * 100) + '%';
   lvl.classList.toggle('active', active);
 
-  const cur = state.events[state.follower.pos];
+  state.follower.update(chroma, rms, time, state.noise);
+
+  const cur = playing() || targetEvent();
   const bars = $('#chroma').children;
   for (let i = 0; i < 12; i++) {
     bars[i].firstChild.style.height = (active ? chroma[i] * 100 : 0) + '%';
@@ -1132,7 +1269,6 @@ function onAudioFrame({ chroma, rms, time }) {
     if (s > bestS) { bestS = s; best = c.name; }
   }
   $('#heardChord').textContent = bestS > 0.6 ? best : '?';
-  state.follower.update(chroma, time);
 }
 
 const MODE_BUTTONS = {
@@ -1167,21 +1303,22 @@ async function startFollow(mode, sourceFactory) {
   }
   state.listener = listener;
   state.mode = mode;
-  state.follower.allowSkip = mode !== 'virtual';
   buildChromaMeter();
   $('#monitor').hidden = false;
   const m = MODE_BUTTONS[mode];
   if (m) { $(m.btn).classList.add('on'); $(m.btn).innerHTML = m.on; }
+  // a barra de baixo (pista + braço + placar) aparece nos dois modos; os botões só no virtual
+  $('#dock').hidden = false;
+  $('#dock').classList.toggle('mic', mode === 'mic');
+  document.body.classList.add('has-dock');
   if (mode === 'virtual') {
     state.noise = 0.004; // sem ruído ambiente: não precisa calibrar
-    $('#dock').hidden = false;
-    document.body.classList.add('has-dock');
-    setStatus('Toque os acordes embaixo do violão (no computador, teclas 1–9). Quando você toca o <b>próximo acorde certo</b>, a letra avança.');
+    setStatus('Toque os acordes embaixo do violão (no computador, teclas 1–9). Bata quantas vezes quiser no ritmo; a letra só anda quando você troca para o <b>acorde certo</b>.');
   } else {
     setStatus('Calibrando… fique em silêncio por um segundo.');
   }
   keepAwake(true);
-  highlight(state.follower.pos);
+  highlight();
 }
 
 const toggleListen = (sourceFactory) => startFollow('mic', sourceFactory);
@@ -1265,6 +1402,7 @@ function selectSong(id) {
   state.song = state.songs.find((s) => s.id === id) || state.songs[0];
   state.transpose = state.song.transpose || 0;
   state.follower = null;
+  resetScore();
   renderSheet();
   $('#btnDelete').hidden = !!state.song.demo;
   scrollTo(0, 0);
@@ -1343,7 +1481,7 @@ function setFont(px) {
 }
 $('#btnFontUp').addEventListener('click', () => setFont(state.fontSize + 2));
 $('#btnFontDown').addEventListener('click', () => setFont(state.fontSize - 2));
-$('#btnRestart').addEventListener('click', () => { state.follower.setPosition(0); smooth.to(0); });
+$('#btnRestart').addEventListener('click', () => { resetScore(); state.follower.setPosition(0); smooth.to(0); });
 
 $('#sensitivity').addEventListener('input', (e) => { state.follower.setSensitivity(+e.target.value); savePrefs(); });
 $('#speed').addEventListener('input', savePrefs);
@@ -1374,6 +1512,6 @@ fillSelect();
 selectSong(state.song.id);
 
 // ganchos para teste/depuração no console
-window.cifraviva = { state, toggleListen, startFollow, strum };
+window.cifraviva = { state, toggleListen, startFollow, strum, resetScore };
 
 })();

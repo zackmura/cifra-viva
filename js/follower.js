@@ -1,86 +1,107 @@
-// Acompanha em que acorde da música você está. Só compara o som com o acorde
-// atual e os próximos (e não com todos os acordes do mundo), o que deixa a
-// detecção bem mais robusta do que tentar "adivinhar" o acorde do zero.
+// Acompanha a música como um jogo (estilo Guitar Hero):
+//  - "alvo" é o acorde que você precisa tocar agora;
+//  - acertou o alvo  -> 'hit'   (a música anda)
+//  - repetiu o acorde que já está tocando (ritmo) -> 'strum' (nada anda)
+//  - tocou outro acorde -> 'miss' (nada anda)
+// Acordes iguais seguidos na cifra (C ... C) contam como um só: você só continua batendo.
 
 import { cosine } from './audio.js';
 import { COMMON_CHORDS } from './chords.js';
 
 export class Follower {
-  constructor(events, onMove) {
+  constructor(events, onEvent) {
     this.events = events; // [{name, tpl}]
-    this.onMove = onMove;
-    this.allowSkip = true; // aceitar pular um acorde (útil no violão real, desligado no virtual)
-    // todos os acordes "concorrentes": se o som parece mais com outro acorde, não avança
+    this.onEvent = onEvent;
+    this.pos = 0; // acorde que está tocando (ou o primeiro, antes de começar)
+    this.started = false; // já tocou o primeiro acorde?
+    this.evidence = 0;
+    this.env = 0; // envelope de volume, para perceber cada batida
+    this.lastOnset = 0;
+    this.onset = null;
     const seen = new Set();
-    this.rivals = [...COMMON_CHORDS, ...events].filter((c) => !seen.has(c.name) && seen.add(c.name)).map((c) => c.tpl);
-    this.pos = 0;
-    this.enteredAt = performance.now();
-    this.avgDur = 2200; // duração média de um acorde (ms), aprendida enquanto você toca
-    this.evidence = [0, 0];
+    this.rivals = [...COMMON_CHORDS, ...events].filter((c) => !seen.has(c.name) && seen.add(c.name));
     this.setSensitivity(5);
   }
 
   /** 1 (cauteloso) a 10 (muito sensível). */
   setSensitivity(s) {
-    this.margin = 0.13 - s * 0.011; // quanto o próximo acorde precisa "ganhar" do atual
-    this.needFrames = Math.round(9 - s * 0.6); // por quantos quadros de 50 ms seguidos
+    this.margin = 0.13 - s * 0.011; // quanto o alvo precisa "ganhar" do acorde atual
+    this.needFrames = Math.round(9 - s * 0.6); // por quantos quadros de 50 ms
     this.minSim = 0.62 - s * 0.012;
-  }
-
-  setPosition(i) {
-    this.pos = Math.max(0, Math.min(this.events.length - 1, i));
-    this.enteredAt = performance.now();
-    this.evidence = [0, 0];
-    this.onMove(this.pos, 'manual');
   }
 
   similar(a, b) {
     return cosine(a.tpl, b.tpl) > 0.9; // ex.: C e C7M, G e G/B
   }
 
-  update(chroma, now) {
+  /** Próximo acorde DIFERENTE depois de i (pula repetições como C ... C). -1 no fim. */
+  nextIndex(i = this.pos) {
     const ev = this.events;
-    const cur = ev[this.pos];
-    const n1 = ev[this.pos + 1];
-    if (!cur || !n1) return null;
-    const n2 = ev[this.pos + 2];
-    const sCur = cosine(chroma, cur.tpl);
-
-    // Mesmo acorde repetido (C ... C): não dá para ouvir a troca, então
-    // avançamos pelo tempo médio que você costuma ficar em cada acorde.
-    if (this.similar(cur, n1)) {
-      if (now - this.enteredAt > this.avgDur && sCur > this.minSim) this.advance(1, now, false);
-      return { sCur, s1: sCur, s2: 0 };
-    }
-
-    const s1 = cosine(chroma, n1.tpl);
-    const canSkip = this.allowSkip && n2 && !this.similar(n1, n2) && !this.similar(cur, n2);
-    const s2 = canSkip ? cosine(chroma, n2.tpl) : -1;
-    const best = s2 > s1 + 0.08 ? 1 : 0;
-    const sBest = best ? s2 : s1;
-    let sAll = 0;
-    for (const t of this.rivals) sAll = Math.max(sAll, cosine(chroma, t));
-
-    if (sBest > this.minSim && sBest > sCur + this.margin && sBest >= sAll - 0.04) {
-      this.evidence[best]++;
-      this.evidence[1 - best] = Math.max(0, this.evidence[1 - best] - 1);
-    } else {
-      this.evidence[0] = Math.max(0, this.evidence[0] - 1);
-      this.evidence[1] = Math.max(0, this.evidence[1] - 1);
-    }
-
-    // Pular um acorde (porque você foi rápido ou ele foi mal detectado) exige mais certeza.
-    const need = best ? this.needFrames * 3 : this.needFrames;
-    if (this.evidence[best] >= need) this.advance(best + 1, now, true);
-    return { sCur, s1, s2 };
+    let j = i + 1;
+    while (j < ev.length && this.similar(ev[j], ev[i])) j++;
+    return j < ev.length ? j : -1;
   }
 
-  advance(steps, now, learn) {
-    const dur = (now - this.enteredAt) / steps;
-    if (learn && dur > 300 && dur < 12000) this.avgDur = this.avgDur * 0.7 + dur * 0.3;
-    this.pos = Math.min(this.events.length - 1, this.pos + steps);
-    this.enteredAt = now;
-    this.evidence = [0, 0];
-    this.onMove(this.pos, 'audio');
+  /** Índice do acorde que você precisa tocar agora. */
+  target() {
+    return this.started ? this.nextIndex() : this.pos;
+  }
+
+  setPosition(i) {
+    this.pos = Math.max(0, Math.min(this.events.length - 1, i));
+    this.started = false;
+    this.evidence = 0;
+    this.onset = null;
+    this.onEvent({ type: 'move', pos: this.pos });
+  }
+
+  bestRival(chroma) {
+    let best = null;
+    let s = 0;
+    for (const r of this.rivals) {
+      const v = cosine(chroma, r.tpl);
+      if (v > s) { s = v; best = r; }
+    }
+    return { chord: best, s };
+  }
+
+  update(chroma, rms, now, noise) {
+    // cada batida nas cordas é um salto de volume
+    if (rms > noise * 1.5 && rms > this.env * 1.5 && now - this.lastOnset > 150) {
+      this.lastOnset = now;
+      this.onset = { frames: 0, decided: false };
+    }
+    this.env = Math.max(rms, this.env * 0.85);
+    if (rms <= noise) { this.evidence = 0; return; }
+
+    const ev = this.events;
+    const ti = this.target();
+    const tgt = ti >= 0 ? ev[ti] : null;
+    const cur = this.started ? ev[this.pos] : null;
+    const sT = tgt ? cosine(chroma, tgt.tpl) : 0;
+    const sC = cur ? cosine(chroma, cur.tpl) : 0;
+    const best = this.bestRival(chroma);
+
+    // acertou o alvo: parece mais com ele do que com o acorde atual e com qualquer outro
+    const hitting = tgt && sT > this.minSim && sT > sC + this.margin && sT >= best.s - 0.04;
+    this.evidence = hitting ? this.evidence + 1 : Math.max(0, this.evidence - 1);
+    if (this.evidence >= this.needFrames) {
+      if (this.started) this.pos = ti;
+      this.started = true;
+      this.evidence = 0;
+      if (this.onset) this.onset.decided = true;
+      this.onEvent({ type: 'hit', pos: this.pos });
+      return;
+    }
+
+    // a batida não foi o alvo: foi o mesmo acorde de antes (ritmo) ou um erro?
+    if (this.onset && !this.onset.decided && ++this.onset.frames >= this.needFrames + 3) {
+      this.onset.decided = true;
+      if (cur && sC > this.minSim && sC >= best.s - 0.05) {
+        this.onEvent({ type: 'strum', pos: this.pos });
+      } else if (best.chord && best.s > this.minSim && !(tgt && cosine(best.chord.tpl, tgt.tpl) > 0.9)) {
+        this.onEvent({ type: 'miss', heard: best.chord.name, expected: tgt?.name || null });
+      }
+    }
   }
 }

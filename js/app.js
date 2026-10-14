@@ -27,6 +27,7 @@ const state = {
   vguitar: null, // violão virtual ligado ao detector
   preview: null, // violão só para ouvir o acorde (fora do modo virtual)
   voicing: {}, // acorde -> índice da variação escolhida
+  score: { hits: 0, misses: 0, combo: 0, best: 0, strums: 0 },
 };
 
 // ---------- armazenamento ----------
@@ -96,15 +97,16 @@ function renderSheet() {
   $('#songArtist').textContent = state.song.artist || '';
   $('#transposeLabel').textContent = state.transpose > 0 ? '+' + state.transpose : String(state.transpose);
 
-  const pos = state.follower ? Math.min(state.follower.pos, state.events.length - 1) : 0;
-  const sens = +$('#sensitivity').value;
-  state.follower = new Follower(state.events, onMove);
-  state.follower.setSensitivity(sens);
-  state.follower.pos = Math.max(0, pos);
-  state.follower.allowSkip = state.mode !== 'virtual';
+  const old = state.follower;
+  state.follower = new Follower(state.events, onFollowEvent);
+  state.follower.setSensitivity(+$('#sensitivity').value);
+  if (old) {
+    state.follower.pos = Math.max(0, Math.min(old.pos, state.events.length - 1));
+    state.follower.started = old.started;
+  }
   renderChordPanel();
   renderDock();
-  highlight(state.follower.pos, false);
+  highlight(false);
 }
 
 // ---------- desenhos dos acordes ----------
@@ -146,7 +148,7 @@ function changeVoicing(name, delta) {
   state.voicing[name] = (i + delta + list.length) % list.length;
   renderChordPanel();
   renderDock();
-  highlight(state.follower.pos, false);
+  highlight(false);
   strum(name);
 }
 
@@ -214,37 +216,117 @@ function renderDock() {
   });
 }
 
-function updateDockHints(i) {
-  const cur = state.events[i]?.name;
-  const next = state.events[i + 1]?.name;
-  document.querySelectorAll('#dock .dock-chord').forEach((b) => {
-    b.classList.toggle('is-current', b.dataset.chord === cur);
-    b.classList.toggle('is-next', b.dataset.chord === next && next !== cur);
-  });
-  // o braço do violão já mostra a posição do PRÓXIMO acorde, para você se preparar
-  const show = next || cur;
-  guitarView.showChord(show && currentVoicing(show).v);
-  $('#dockHint').innerHTML = next
-    ? `Agora <b>${cur}</b> · próximo <b class="hint-next">${next}</b> <span class="label">(dedos no braço)</span>`
-    : `Último acorde: <b>${cur || '–'}</b>`;
+// ---------- jogo: pista de acordes, placar e avisos ----------
+function playing() {
+  const f = state.follower;
+  return f.started ? state.events[f.pos] : null;
+}
+function targetEvent() {
+  const ti = state.follower.target();
+  return ti >= 0 ? state.events[ti] : null;
 }
 
-function highlight(i, scroll = true) {
-  document.querySelectorAll('.ch.current, .ch.next').forEach((e) => e.classList.remove('current', 'next'));
+/** Pista estilo Guitar Hero: o acorde que está tocando e os próximos que vêm aí. */
+function renderLane(advance = false) {
+  const f = state.follower;
+  const lane = $('#lane');
+  const items = [];
+  let i = f.pos;
+  while (i >= 0 && items.length < 7) { items.push(i); i = f.nextIndex(i); }
+  lane.innerHTML = items.map((idx, k) => {
+    const name = state.events[idx].name;
+    let cls = 'lane-chip';
+    let extra = '';
+    if (k === 0 && f.started) {
+      cls += ' playing';
+      if (state.score.strums > 1) extra = `<small>×${state.score.strums}</small>`;
+    } else if ((k === 0 && !f.started) || (k === 1 && f.started)) {
+      cls += ' target';
+    }
+    return `<span class="${cls}">${name}${extra}</span>`;
+  }).join('') + (i < 0 && items.length < 7 ? '<span class="lane-chip end">🏁</span>' : '');
+  if (advance) { lane.classList.remove('advance'); void lane.offsetWidth; lane.classList.add('advance'); }
+}
+
+function renderScore() {
+  const s = state.score;
+  const total = s.hits + s.misses;
+  $('#score').innerHTML = `<span class="ok">✓ ${s.hits}</span><span class="bad">✗ ${s.misses}</span>`
+    + `<span class="combo${s.combo >= 5 ? ' hot' : ''}">🔥 ${s.combo}</span>`
+    + (total ? `<span class="acc">${Math.round((s.hits / total) * 100)}%</span>` : '');
+}
+
+function resetScore() {
+  Object.assign(state.score, { hits: 0, misses: 0, combo: 0, best: 0, strums: 0 });
+}
+
+let feedbackTimer = 0;
+function feedback(html, kind) {
+  const el = $('#feedback');
+  el.innerHTML = html;
+  el.className = 'feedback ' + kind;
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(feedbackTimer);
+  feedbackTimer = setTimeout(() => el.classList.remove('show'), 1100);
+}
+
+function updateGame() {
+  const cur = playing();
+  const tgt = targetEvent();
+  // o braço mostra o acorde que você ESTÁ tocando; só muda quando você acerta o próximo
+  const show = cur || tgt;
+  guitarView.showChord(show && currentVoicing(show.name).v);
+  document.querySelectorAll('#dock .dock-chord').forEach((b) => {
+    b.classList.toggle('is-current', !!cur && b.dataset.chord === cur.name);
+    b.classList.toggle('is-next', !!tgt && b.dataset.chord === tgt.name);
+  });
+  $('#dockHint').innerHTML = !cur
+    ? `Toque <b class="hint-next">${tgt?.name}</b> para começar`
+    : tgt
+      ? `Tocando <b>${cur.name}</b> · troque para <b class="hint-next">${tgt.name}</b>`
+      : 'Último acorde — termine a música! 🎉';
+  renderLane();
+  renderScore();
+}
+
+function highlight(scroll = true) {
+  document.querySelectorAll('.ch.current, .ch.next, .ch.waiting').forEach((e) => e.classList.remove('current', 'next', 'waiting'));
   document.querySelectorAll('.row.current, .row.past').forEach((e) => e.classList.remove('current', 'past'));
-  const ev = state.events[i];
+  const f = state.follower;
+  const ev = state.events[f.pos];
   if (!ev) return;
-  ev.el.classList.add('current');
-  state.events[i + 1]?.el.classList.add('next');
+  ev.el.classList.add(f.started ? 'current' : 'waiting');
+  if (f.started) targetEvent()?.el.classList.add('next');
   ev.row.classList.add('current');
-  updateDockHints(i);
   let r = ev.row.previousElementSibling;
   while (r) { r.classList.add('past'); r = r.previousElementSibling; }
+  updateGame();
   if (scroll) scrollToRow(ev.row);
 }
 
-function onMove(i) {
-  highlight(i);
+function onFollowEvent(e) {
+  const s = state.score;
+  if (e.type === 'hit') {
+    s.hits++;
+    s.combo++;
+    s.best = Math.max(s.best, s.combo);
+    s.strums = 1;
+    feedback(s.combo >= 5 && s.combo % 5 === 0 ? `🔥 ${s.combo} seguidos!` : '✓', 'ok');
+    highlight(true);
+    renderLane(true);
+  } else if (e.type === 'strum') {
+    s.strums++; // batendo o mesmo acorde no ritmo: nada anda
+    renderLane();
+  } else if (e.type === 'miss') {
+    s.misses++;
+    s.combo = 0;
+    feedback(`✗ ${e.heard}${e.expected ? ` <small>era ${e.expected}</small>` : ''}`, 'bad');
+    renderScore();
+  } else if (e.type === 'move') {
+    s.strums = 0;
+    highlight(true);
+  }
 }
 
 // ---------- rolagem suave ----------
@@ -298,7 +380,7 @@ function onAudioFrame({ chroma, rms, time }) {
     if (state.calib.length >= 20) {
       const avg = state.calib.reduce((a, b) => a + b, 0) / state.calib.length;
       state.noise = Math.max(0.004, avg * 2.5);
-      setStatus('Pode tocar! Toque o <b>primeiro acorde</b> destacado e siga a música. Se ele se perder, clique no acorde certo.');
+      setStatus('Pode tocar! Comece pelo acorde destacado e bata no ritmo que quiser; a letra anda quando você troca para o acorde certo. Se ele se perder, toque no acorde certo da letra.');
     }
     return;
   }
@@ -308,7 +390,9 @@ function onAudioFrame({ chroma, rms, time }) {
   lvl.style.height = Math.min(100, (rms / (state.noise * 4)) * 100) + '%';
   lvl.classList.toggle('active', active);
 
-  const cur = state.events[state.follower.pos];
+  state.follower.update(chroma, rms, time, state.noise);
+
+  const cur = playing() || targetEvent();
   const bars = $('#chroma').children;
   for (let i = 0; i < 12; i++) {
     bars[i].firstChild.style.height = (active ? chroma[i] * 100 : 0) + '%';
@@ -323,7 +407,6 @@ function onAudioFrame({ chroma, rms, time }) {
     if (s > bestS) { bestS = s; best = c.name; }
   }
   $('#heardChord').textContent = bestS > 0.6 ? best : '?';
-  state.follower.update(chroma, time);
 }
 
 const MODE_BUTTONS = {
@@ -358,21 +441,22 @@ async function startFollow(mode, sourceFactory) {
   }
   state.listener = listener;
   state.mode = mode;
-  state.follower.allowSkip = mode !== 'virtual';
   buildChromaMeter();
   $('#monitor').hidden = false;
   const m = MODE_BUTTONS[mode];
   if (m) { $(m.btn).classList.add('on'); $(m.btn).innerHTML = m.on; }
+  // a barra de baixo (pista + braço + placar) aparece nos dois modos; os botões só no virtual
+  $('#dock').hidden = false;
+  $('#dock').classList.toggle('mic', mode === 'mic');
+  document.body.classList.add('has-dock');
   if (mode === 'virtual') {
     state.noise = 0.004; // sem ruído ambiente: não precisa calibrar
-    $('#dock').hidden = false;
-    document.body.classList.add('has-dock');
-    setStatus('Toque os acordes embaixo do violão (no computador, teclas 1–9). Quando você toca o <b>próximo acorde certo</b>, a letra avança.');
+    setStatus('Toque os acordes embaixo do violão (no computador, teclas 1–9). Bata quantas vezes quiser no ritmo; a letra só anda quando você troca para o <b>acorde certo</b>.');
   } else {
     setStatus('Calibrando… fique em silêncio por um segundo.');
   }
   keepAwake(true);
-  highlight(state.follower.pos);
+  highlight();
 }
 
 const toggleListen = (sourceFactory) => startFollow('mic', sourceFactory);
@@ -456,6 +540,7 @@ function selectSong(id) {
   state.song = state.songs.find((s) => s.id === id) || state.songs[0];
   state.transpose = state.song.transpose || 0;
   state.follower = null;
+  resetScore();
   renderSheet();
   $('#btnDelete').hidden = !!state.song.demo;
   scrollTo(0, 0);
@@ -534,7 +619,7 @@ function setFont(px) {
 }
 $('#btnFontUp').addEventListener('click', () => setFont(state.fontSize + 2));
 $('#btnFontDown').addEventListener('click', () => setFont(state.fontSize - 2));
-$('#btnRestart').addEventListener('click', () => { state.follower.setPosition(0); smooth.to(0); });
+$('#btnRestart').addEventListener('click', () => { resetScore(); state.follower.setPosition(0); smooth.to(0); });
 
 $('#sensitivity').addEventListener('input', (e) => { state.follower.setSensitivity(+e.target.value); savePrefs(); });
 $('#speed').addEventListener('input', savePrefs);
@@ -565,4 +650,4 @@ fillSelect();
 selectSong(state.song.id);
 
 // ganchos para teste/depuração no console
-window.cifraviva = { state, toggleListen, startFollow, strum };
+window.cifraviva = { state, toggleListen, startFollow, strum, resetScore };

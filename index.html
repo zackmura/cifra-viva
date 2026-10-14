@@ -74,9 +74,14 @@
   <aside class="dock" id="dock" hidden>
     <div class="dock-head">
       <span id="dockHint" class="dock-hint"></span>
-      <button type="button" id="dockClose" aria-label="Fechar violão virtual">✕</button>
+      <span id="score" class="score"></span>
+      <button type="button" id="dockClose" aria-label="Fechar">✕</button>
     </div>
-    <div class="guitar" id="guitar"></div>
+    <div class="lane-wrap"><div class="lane" id="lane"></div></div>
+    <div class="neck-wrap">
+      <div class="guitar" id="guitar"></div>
+      <div class="feedback" id="feedback" aria-live="polite"></div>
+    </div>
     <div class="dock-chords" id="dockChords"></div>
   </aside>
 
