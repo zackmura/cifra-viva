@@ -38,10 +38,21 @@ try {
 // cria as tabelas na primeira vez
 $pdo->exec('CREATE TABLE IF NOT EXISTS cv_users (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    email VARCHAR(190) NOT NULL UNIQUE,
+    username VARCHAR(40) NULL UNIQUE,
+    email VARCHAR(190) NULL UNIQUE,
     pass_hash VARCHAR(255) NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+// contas criadas na versão antiga (só com e-mail) ganham um nome de usuário:
+// a parte antes do @ (ex.: fulano@gmail.com -> fulano)
+$hasUsername = (int) $pdo->query("SELECT COUNT(*) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cv_users' AND COLUMN_NAME = 'username'")->fetchColumn();
+if (!$hasUsername) {
+    $pdo->exec('ALTER TABLE cv_users ADD COLUMN username VARCHAR(40) NULL UNIQUE AFTER id');
+    $pdo->exec('ALTER TABLE cv_users MODIFY email VARCHAR(190) NULL');
+    $pdo->exec("UPDATE IGNORE cv_users SET username = LOWER(SUBSTRING_INDEX(email, '@', 1)) WHERE username IS NULL");
+}
 $pdo->exec('CREATE TABLE IF NOT EXISTS cv_tokens (
     token_hash CHAR(64) PRIMARY KEY,
     user_id INT NOT NULL,
@@ -91,7 +102,7 @@ function currentUser(PDO $pdo): array
     if (!preg_match('/^[a-f0-9]{64}$/', $token)) {
         fail(401, 'Entre na sua conta.');
     }
-    $q = $pdo->prepare('SELECT u.id, u.email FROM cv_tokens t JOIN cv_users u ON u.id = t.user_id
+    $q = $pdo->prepare('SELECT u.id, u.username, u.email FROM cv_tokens t JOIN cv_users u ON u.id = t.user_id
                         WHERE t.token_hash = ? AND t.expires_at > NOW()');
     $q->execute([hash('sha256', $token)]);
     $user = $q->fetch();
@@ -113,38 +124,39 @@ switch ($action) {
             fail(429, 'Muitas tentativas. Espere 15 minutos.');
         }
         recordAttempt($pdo, $ip);
-        $email = strtolower(trim((string) ($body['email'] ?? '')));
+        $username = strtolower(trim((string) ($body['username'] ?? '')));
         $pass = (string) ($body['password'] ?? '');
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($pass) < 8) {
-            fail(400, 'Use um e-mail válido e uma senha com pelo menos 8 caracteres.');
+        if (!preg_match('/^[a-z0-9._-]{3,30}$/', $username) || strlen($pass) < 8) {
+            fail(400, 'Nome de usuário: 3 a 30 letras/números (sem espaço). Senha: pelo menos 8 caracteres.');
         }
         try {
-            $pdo->prepare('INSERT INTO cv_users (email, pass_hash) VALUES (?, ?)')
-                ->execute([$email, password_hash($pass, PASSWORD_DEFAULT)]);
+            $pdo->prepare('INSERT INTO cv_users (username, pass_hash) VALUES (?, ?)')
+                ->execute([$username, password_hash($pass, PASSWORD_DEFAULT)]);
         } catch (PDOException $e) {
-            fail(409, 'Esse e-mail já tem conta. Use Entrar.');
+            fail(409, 'Esse nome de usuário já existe. Use Entrar.');
         }
         $id = (int) $pdo->lastInsertId();
-        out(['token' => newToken($pdo, $id), 'email' => $email]);
+        out(['token' => newToken($pdo, $id), 'username' => $username]);
 
     case 'login':
         if (tooManyAttempts($pdo, $ip)) {
             fail(429, 'Muitas tentativas. Espere 15 minutos.');
         }
-        $email = strtolower(trim((string) ($body['email'] ?? '')));
-        $q = $pdo->prepare('SELECT id, pass_hash FROM cv_users WHERE email = ?');
-        $q->execute([$email]);
+        // aceita o nome de usuário (ou o e-mail, para contas antigas)
+        $login = strtolower(trim((string) ($body['username'] ?? '')));
+        $q = $pdo->prepare('SELECT id, username, email, pass_hash FROM cv_users WHERE username = ? OR email = ? LIMIT 1');
+        $q->execute([$login, $login]);
         $user = $q->fetch();
         if (!$user || !password_verify((string) ($body['password'] ?? ''), $user['pass_hash'])) {
             recordAttempt($pdo, $ip);
-            fail(401, 'E-mail ou senha incorretos.');
+            fail(401, 'Usuário ou senha incorretos.');
         }
         $pdo->exec('DELETE FROM cv_tokens WHERE expires_at < NOW()');
-        out(['token' => newToken($pdo, (int) $user['id']), 'email' => $email]);
+        out(['token' => newToken($pdo, (int) $user['id']), 'username' => $user['username'] ?: $user['email']]);
 
     case 'me':
         $u = currentUser($pdo);
-        out(['email' => $u['email']]);
+        out(['username' => $u['username'] ?: $u['email']]);
 
     case 'logout':
         currentUser($pdo);

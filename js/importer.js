@@ -1,30 +1,52 @@
 // Importar: colar uma cifra copiada (limpa o texto) ou gerar a cifra a partir de um áudio.
 
 import { analyzeAudioBuffer, cosine } from './audio.js';
-import { parseChord, chordTemplate, NOTES_SHARP } from './chords.js';
+import { parseChord, chordTemplate, isChord, NOTES_SHARP } from './chords.js';
 import { voicingsFor } from './guitar.js';
 import { diagramSVG } from './diagram.js';
 import { GENRES } from './songs.js';
 import { $, esc, saveSong } from './store.js';
 
 // linhas que os sites de cifra colocam e que não são música
-const JUNK = /^\s*(tom:|capotraste|afinação|afinacao|composição|composicao|colaboração|colaboracao|exibir|imprimir|versão|versao|cifra:|cifra club|ver mais|tablatura de|enviada por|revisada por|\d+\s*(exibições|visualizações))/i;
+const JUNK = new RegExp('^\\s*(' + [
+  'tom:', 'capotraste', 'afinação', 'afinacao', 'composição', 'composicao', 'colaboração', 'colaboracao',
+  'exibir', 'imprimir', 'versão', 'versao', 'cifra:', 'cifra club', 'ver mais', 'tablatura de', 'enviada por',
+  'revisada por', 'essa informação', 'esta informação', 'nos avise', 'simplificar', 'auto rolagem', 'compartilhar',
+  'adicionar à lista', 'baixar', 'comentários', 'parte \\d+ de \\d+', '\\d+\\s*(exibições|visualizações)',
+].join('|') + ')', 'i');
+const BATIDA = /batida|ritmo/i;
 
-/** Limpa uma cifra colada de um site. Retorna { text, key, capo }. */
+/** Limpa uma cifra colada de um site. Retorna { text, key, capo, title, artist, strum }. */
 export function cleanPasted(raw) {
   let key = '';
   let capo = 0;
+  let strum = '';
   const out = [];
   for (const line of raw.replace(/\r/g, '').replace(/ /g, ' ').split('\n')) {
     const k = /tom:\s*([A-G][#b]?m?)/i.exec(line);
     if (k) key = k[1];
     const c = /capotraste\D*(\d+)/i.exec(line);
     if (c) capo = +c[1];
+    // batida escrita com setas (↓ ↑) ou letras (B C / D U)
+    if (BATIDA.test(line) && /[↓↑]/.test(line)) {
+      strum = [...line.replace(/[^↓↑·-]/g, '')].map((ch) => (ch === '↓' ? 'D' : ch === '↑' ? 'U' : '-')).join('').slice(0, 8);
+      continue;
+    }
     if (JUNK.test(line)) continue;
     out.push(line.replace(/\s+$/, ''));
   }
-  const text = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  return { text, key, capo };
+  let lines = out.join('\n').replace(/\n{3,}/g, '\n\n').trim().split('\n');
+
+  // as duas primeiras linhas costumam ser o título e o artista (se não forem música)
+  const looksMusical = (l) => /^\s*\[/.test(l) || /\|-/.test(l) || (l.trim() && l.trim().split(/\s+/).every(isChord));
+  let title = '';
+  let artist = '';
+  if (lines[0] && !looksMusical(lines[0]) && lines[0].length <= 70) {
+    title = lines.shift().trim();
+    if (lines[0] && !looksMusical(lines[0]) && lines[0].trim() && lines[0].length <= 50) artist = lines.shift().trim();
+  }
+  const text = lines.join('\n').trim();
+  return { text, key, capo, title, artist, strum };
 }
 
 // ---------- áudio -> acordes ----------
@@ -85,13 +107,16 @@ export function renderImport(root) {
 
       <section class="card">
         <h2>📋 Colar cifra de um site</h2>
-        <p class="muted">Copie a cifra de um site (só a parte da música) e cole aqui. O Cifra Viva limpa o texto, entende os acordes acima da letra, tablaturas e o tom. Para uso pessoal.</p>
+        <p class="muted">Copie a cifra de um site (do título até o fim da música) e cole aqui. O Cifra Viva limpa o texto e entende acordes acima da letra, tablaturas, tom e capotraste. Fica salvo só na sua conta (uso pessoal).</p>
+        <textarea id="imText" rows="12" spellcheck="false" placeholder="Cole a cifra aqui…"></textarea>
         <div class="form-grid">
-          <label>Título <input id="imTitle" placeholder="Nome da música"></label>
+          <label>Título <input id="imTitle" placeholder="preenche sozinho ao colar"></label>
           <label>Artista <input id="imArtist"></label>
           <label>Gênero <select id="imGenre">${GENRES.map((g) => `<option value="${g.id}">${g.icon} ${g.name}</option>`).join('')}</select></label>
+          <label>Nível <select id="imLevel"><option value="1">Fácil</option><option value="2" selected>Médio</option><option value="3">Difícil</option></select></label>
+          <label>BPM <input id="imBpm" type="number" min="30" max="250" placeholder="ex.: 120"></label>
+          <label>Batida <input id="imStrum" placeholder="ex.: D-DU-UDU" maxlength="8"></label>
         </div>
-        <textarea id="imText" rows="12" spellcheck="false" placeholder="Cole a cifra aqui…"></textarea>
         <div class="actions"><button type="button" class="primary" id="imSave">Salvar e abrir</button></div>
       </section>
 
@@ -117,20 +142,29 @@ export function renderImport(root) {
       </section>
     </div>`;
 
+  // ao colar, já preenche título, artista, tom e batida que encontrar
+  $('#imText').addEventListener('paste', () => setTimeout(() => {
+    const p = cleanPasted($('#imText').value);
+    if (p.title && !$('#imTitle').value) $('#imTitle').value = p.title;
+    if (p.artist && !$('#imArtist').value) $('#imArtist').value = p.artist;
+    if (p.strum && !$('#imStrum').value) $('#imStrum').value = p.strum;
+  }));
+
   $('#imSave').addEventListener('click', () => {
-    const { text, key, capo } = cleanPasted($('#imText').value);
-    if (!text) { alert('Cole a cifra primeiro.'); return; }
-    const firstLine = text.split('\n')[0].trim();
+    const p = cleanPasted($('#imText').value);
+    if (!p.text) { alert('Cole a cifra primeiro.'); return; }
     const id = 'u' + Date.now();
     saveSong({
       id,
-      title: $('#imTitle').value.trim() || firstLine.slice(0, 60) || 'Cifra importada',
-      artist: $('#imArtist').value.trim(),
+      title: $('#imTitle').value.trim() || p.title || 'Cifra importada',
+      artist: $('#imArtist').value.trim() || p.artist,
       genre: $('#imGenre').value,
-      level: 2,
-      key,
-      capo: capo || undefined,
-      text,
+      level: +$('#imLevel').value,
+      key: p.key,
+      capo: p.capo || undefined,
+      bpm: +$('#imBpm').value || undefined,
+      strum: $('#imStrum').value.trim().toUpperCase().replace(/[^DU-]/g, '') || undefined,
+      text: p.text,
     });
     location.hash = '#/musica/' + id;
   });

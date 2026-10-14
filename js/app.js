@@ -5,7 +5,7 @@ import { renderHome, renderCatalog, renderRepertoire } from './pages.js';
 import { openSong, closePlayer, openEditor, setFont, startFollow, stopListen, playerState, strum, resetScore } from './player.js';
 import { renderTuner, stopTuner, renderPractice, stopDrill } from './tools.js';
 import { renderImport, stopImport } from './importer.js';
-import { renderAccount, detectApi } from './account.js';
+import { renderAccount, renderLogin, initAccount, needsLogin, isPublished, isLoggedIn, onSynced } from './account.js';
 
 const VIEWS = {
   '': { view: 'page', nav: 'home', render: renderHome },
@@ -19,6 +19,7 @@ const VIEWS = {
 };
 
 let current = null;
+let locked = false; // site publicado e ainda sem login: só mostra a tela de entrar
 
 function leave() {
   closePlayer();
@@ -32,6 +33,15 @@ function route() {
   const [path, query = ''] = hash.split('?');
   const [name, arg] = path.split('/');
   const params = new URLSearchParams(query);
+
+  document.body.classList.toggle('locked', locked);
+  if (locked) {
+    leave();
+    $('#view-page').hidden = false;
+    $('#view-player').hidden = true;
+    renderLogin($('#view-page'), () => { locked = false; route(); });
+    return;
+  }
 
   if (name === 'nova') { // abre o editor por cima da página atual
     history.replaceState(null, '', current ? '#/' + current : '#/');
@@ -61,8 +71,26 @@ addEventListener('hashchange', route);
 $('#sensitivity').value = data.prefs.sensitivity;
 $('#speed').value = data.prefs.speed;
 setFont(data.prefs.fontSize || 20);
-route();
-detectApi();
+
+// chegaram dados de outro aparelho: redesenha as listas (sem atrapalhar quem está tocando)
+onSynced(() => {
+  const name = (current || '').split(/[/?]/)[0];
+  if (['', 'musicas', 'repertorio'].includes(name)) route();
+});
+
+(async () => {
+  if (isPublished() && !isLoggedIn()) {
+    // publicado e sem login: confere a API antes de decidir se mostra a tela de entrar
+    $('#view-page').innerHTML = '<div class="login-wrap"><p class="muted">Carregando…</p></div>';
+    document.body.classList.add('locked');
+    await initAccount();
+    locked = needsLogin();
+    route();
+  } else {
+    route();
+    initAccount(); // confere a sessão e sincroniza em segundo plano
+  }
+})();
 
 // "instalar" no celular e funcionar sem internet quando publicado em https
 if (location.protocol === 'https:') {

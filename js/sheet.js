@@ -5,7 +5,8 @@
 import { isChord } from './chords.js';
 
 const SECTION_RE = /^(intro|introdução|introducao|verso|estrofe|refrão|refrao|pré-refrão|pre-refrão|pre-refrao|ponte|solo|final|outro|coda|interlúdio|interludio|parte\s*\d+|primeira parte|segunda parte|terceira parte)\s*:?$/i;
-const NOISE_TOKEN = /^(\|+|x\d+|\(x\d+\)|-+|\.+|%|\(|\))$/i;
+// coisas que aparecem nas linhas de acordes e não são acordes: |, 2x, (x2), (2x), -, ...
+const NOISE_TOKEN = /^(\|+|:?\|\|?:?|x\d+|\d+x|\(x?\d+x?\)|-+|\.+|%|\(|\)|→|>)$/i;
 
 function isChordLine(line) {
   const toks = line.trim().split(/\s+/);

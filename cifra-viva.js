@@ -97,7 +97,8 @@ const COMMON_CHORDS = NOTES_SHARP.flatMap((n) => [n, n + 'm']).map((name) => {
 
 
 const SECTION_RE = /^(intro|introdução|introducao|verso|estrofe|refrão|refrao|pré-refrão|pre-refrão|pre-refrao|ponte|solo|final|outro|coda|interlúdio|interludio|parte\s*\d+|primeira parte|segunda parte|terceira parte)\s*:?$/i;
-const NOISE_TOKEN = /^(\|+|x\d+|\(x\d+\)|-+|\.+|%|\(|\))$/i;
+// coisas que aparecem nas linhas de acordes e não são acordes: |, 2x, (x2), (2x), -, ...
+const NOISE_TOKEN = /^(\|+|:?\|\|?:?|x\d+|\d+x|\(x?\d+x?\)|-+|\.+|%|\(|\)|→|>)$/i;
 
 function isChordLine(line) {
   const toks = line.trim().split(/\s+/);
@@ -2668,23 +2669,45 @@ function renderRepertoire(root) {
 
 
 // linhas que os sites de cifra colocam e que não são música
-const JUNK = /^\s*(tom:|capotraste|afinação|afinacao|composição|composicao|colaboração|colaboracao|exibir|imprimir|versão|versao|cifra:|cifra club|ver mais|tablatura de|enviada por|revisada por|\d+\s*(exibições|visualizações))/i;
+const JUNK = new RegExp('^\\s*(' + [
+  'tom:', 'capotraste', 'afinação', 'afinacao', 'composição', 'composicao', 'colaboração', 'colaboracao',
+  'exibir', 'imprimir', 'versão', 'versao', 'cifra:', 'cifra club', 'ver mais', 'tablatura de', 'enviada por',
+  'revisada por', 'essa informação', 'esta informação', 'nos avise', 'simplificar', 'auto rolagem', 'compartilhar',
+  'adicionar à lista', 'baixar', 'comentários', 'parte \\d+ de \\d+', '\\d+\\s*(exibições|visualizações)',
+].join('|') + ')', 'i');
+const BATIDA = /batida|ritmo/i;
 
-/** Limpa uma cifra colada de um site. Retorna { text, key, capo }. */
+/** Limpa uma cifra colada de um site. Retorna { text, key, capo, title, artist, strum }. */
 function cleanPasted(raw) {
   let key = '';
   let capo = 0;
+  let strum = '';
   const out = [];
   for (const line of raw.replace(/\r/g, '').replace(/ /g, ' ').split('\n')) {
     const k = /tom:\s*([A-G][#b]?m?)/i.exec(line);
     if (k) key = k[1];
     const c = /capotraste\D*(\d+)/i.exec(line);
     if (c) capo = +c[1];
+    // batida escrita com setas (↓ ↑) ou letras (B C / D U)
+    if (BATIDA.test(line) && /[↓↑]/.test(line)) {
+      strum = [...line.replace(/[^↓↑·-]/g, '')].map((ch) => (ch === '↓' ? 'D' : ch === '↑' ? 'U' : '-')).join('').slice(0, 8);
+      continue;
+    }
     if (JUNK.test(line)) continue;
     out.push(line.replace(/\s+$/, ''));
   }
-  const text = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  return { text, key, capo };
+  let lines = out.join('\n').replace(/\n{3,}/g, '\n\n').trim().split('\n');
+
+  // as duas primeiras linhas costumam ser o título e o artista (se não forem música)
+  const looksMusical = (l) => /^\s*\[/.test(l) || /\|-/.test(l) || (l.trim() && l.trim().split(/\s+/).every(isChord));
+  let title = '';
+  let artist = '';
+  if (lines[0] && !looksMusical(lines[0]) && lines[0].length <= 70) {
+    title = lines.shift().trim();
+    if (lines[0] && !looksMusical(lines[0]) && lines[0].trim() && lines[0].length <= 50) artist = lines.shift().trim();
+  }
+  const text = lines.join('\n').trim();
+  return { text, key, capo, title, artist, strum };
 }
 
 // ---------- áudio -> acordes ----------
@@ -2745,13 +2768,16 @@ function renderImport(root) {
 
       <section class="card">
         <h2>📋 Colar cifra de um site</h2>
-        <p class="muted">Copie a cifra de um site (só a parte da música) e cole aqui. O Cifra Viva limpa o texto, entende os acordes acima da letra, tablaturas e o tom. Para uso pessoal.</p>
+        <p class="muted">Copie a cifra de um site (do título até o fim da música) e cole aqui. O Cifra Viva limpa o texto e entende acordes acima da letra, tablaturas, tom e capotraste. Fica salvo só na sua conta (uso pessoal).</p>
+        <textarea id="imText" rows="12" spellcheck="false" placeholder="Cole a cifra aqui…"></textarea>
         <div class="form-grid">
-          <label>Título <input id="imTitle" placeholder="Nome da música"></label>
+          <label>Título <input id="imTitle" placeholder="preenche sozinho ao colar"></label>
           <label>Artista <input id="imArtist"></label>
           <label>Gênero <select id="imGenre">${GENRES.map((g) => `<option value="${g.id}">${g.icon} ${g.name}</option>`).join('')}</select></label>
+          <label>Nível <select id="imLevel"><option value="1">Fácil</option><option value="2" selected>Médio</option><option value="3">Difícil</option></select></label>
+          <label>BPM <input id="imBpm" type="number" min="30" max="250" placeholder="ex.: 120"></label>
+          <label>Batida <input id="imStrum" placeholder="ex.: D-DU-UDU" maxlength="8"></label>
         </div>
-        <textarea id="imText" rows="12" spellcheck="false" placeholder="Cole a cifra aqui…"></textarea>
         <div class="actions"><button type="button" class="primary" id="imSave">Salvar e abrir</button></div>
       </section>
 
@@ -2777,20 +2803,29 @@ function renderImport(root) {
       </section>
     </div>`;
 
+  // ao colar, já preenche título, artista, tom e batida que encontrar
+  $('#imText').addEventListener('paste', () => setTimeout(() => {
+    const p = cleanPasted($('#imText').value);
+    if (p.title && !$('#imTitle').value) $('#imTitle').value = p.title;
+    if (p.artist && !$('#imArtist').value) $('#imArtist').value = p.artist;
+    if (p.strum && !$('#imStrum').value) $('#imStrum').value = p.strum;
+  }));
+
   $('#imSave').addEventListener('click', () => {
-    const { text, key, capo } = cleanPasted($('#imText').value);
-    if (!text) { alert('Cole a cifra primeiro.'); return; }
-    const firstLine = text.split('\n')[0].trim();
+    const p = cleanPasted($('#imText').value);
+    if (!p.text) { alert('Cole a cifra primeiro.'); return; }
     const id = 'u' + Date.now();
     saveSong({
       id,
-      title: $('#imTitle').value.trim() || firstLine.slice(0, 60) || 'Cifra importada',
-      artist: $('#imArtist').value.trim(),
+      title: $('#imTitle').value.trim() || p.title || 'Cifra importada',
+      artist: $('#imArtist').value.trim() || p.artist,
       genre: $('#imGenre').value,
-      level: 2,
-      key,
-      capo: capo || undefined,
-      text,
+      level: +$('#imLevel').value,
+      key: p.key,
+      capo: p.capo || undefined,
+      bpm: +$('#imBpm').value || undefined,
+      strum: $('#imStrum').value.trim().toUpperCase().replace(/[^DU-]/g, '') || undefined,
+      text: p.text,
     });
     location.hash = '#/musica/' + id;
   });
@@ -2865,18 +2900,34 @@ function stopImport() {
 }
 
 // ===== js/account.js =====
-// Conta e sincronização (celular <-> computador) usando a API em PHP + MySQL da Hostinger.
-// Sem a API (ex.: abrindo o arquivo direto ou no GitHub Pages) tudo continua só no navegador.
+// Conta (nome de usuário + senha) e sincronização automática entre aparelhos,
+// usando a API em PHP + MySQL da Hostinger.
+//  - Publicado (http/https com a API): só entra quem fez login.
+//  - Abrindo o arquivo direto no computador (sem API): funciona sem login, só neste navegador.
+//  - A sincronização é sozinha: baixa ao abrir/voltar para o app e a cada minuto,
+//    e envia logo depois de cada mudança.
 
 
 const API = 'api/index.php';
 const TOKEN_KEY = 'cifraviva.token';
-let token = null;
-try { token = localStorage.getItem(TOKEN_KEY); } catch { /* sem armazenamento */ }
-let apiInfo = null; // { ok, registration } quando a API existe
-let email = '';
+const USER_KEY = 'cifraviva.user';
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch { /* sem armazenamento */ } },
+};
+
+let token = store.get(TOKEN_KEY);
+let username = store.get(USER_KEY) || '';
+let apiInfo = null; // { ok, registration } quando a API responde
 let pushTimer = 0;
 let syncing = false;
+let lastPull = 0;
+let lastSyncAt = 0;
+let syncError = '';
+const syncedListeners = [];
+
+/** Avisa quando chegaram dados novos da nuvem (para redesenhar a página). */
+function onSynced(fn) { syncedListeners.push(fn); }
 
 async function call(action, body) {
   const res = await fetch(`${API}?a=${action}`, {
@@ -2886,42 +2937,60 @@ async function call(action, body) {
     cache: 'no-store',
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `Erro ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(json.error || `Erro ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return json;
 }
 
-async function detectApi() {
-  if (!location.protocol.startsWith('http')) return null;
+function setSession(t, name) {
+  token = t;
+  username = name || '';
+  store.set(TOKEN_KEY, t);
+  store.set(USER_KEY, name);
+}
+
+const isPublished = () => location.protocol.startsWith('http');
+const isLoggedIn = () => !!token;
+/** Precisa mostrar a tela de login? (site publicado e sem login) */
+const needsLogin = () => isPublished() && !token && apiInfo !== false;
+
+/**
+ * Descobre se a API existe e confere a sessão. Retorna quando já dá para decidir
+ * se mostra o site ou a tela de login.
+ */
+async function initAccount() {
+  if (!isPublished()) { apiInfo = false; return; }
   try {
     const r = await call('ping');
-    apiInfo = r && r.ok === true ? r : null; // só vale se o PHP respondeu de verdade
+    apiInfo = r && r.ok === true ? r : false;
   } catch {
-    apiInfo = null;
+    apiInfo = token ? null : false; // sem internet: quem já entrou continua usando
   }
   if (apiInfo && token) {
     try {
-      email = (await call('me')).email;
-      await pullAndMerge();
-    } catch {
-      setToken(null);
+      username = (await call('me')).username;
+      store.set(USER_KEY, username);
+      syncNow();
+    } catch (err) {
+      if (err.status === 401) setSession(null, null); // sessão expirou
     }
   }
   updateBadge();
-  return apiInfo;
-}
-
-function setToken(t) {
-  token = t;
-  try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch { /* sem armazenamento */ }
 }
 
 function updateBadge() {
   const a = $('#accountLink');
   if (!a) return;
-  a.hidden = !apiInfo;
-  a.textContent = token ? '👤 ' + (email.split('@')[0] || 'Conta') : '👤 Entrar';
-  a.classList.toggle('on', !!token);
+  a.hidden = !apiInfo || !token;
+  const t = lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+  a.innerHTML = `${syncing ? '⟳' : syncError ? '⚠️' : '☁️'} ${esc(username)}`;
+  a.title = syncing ? 'Sincronizando…' : syncError ? `Não sincronizou: ${syncError}` : t ? `Sincronizado às ${t}` : '';
 }
+
+// ---------- sincronização ----------
 
 /** Junta os dados da nuvem com os do aparelho (nada se perde). */
 function merge(local, remote) {
@@ -2960,75 +3029,120 @@ function merge(local, remote) {
   };
 }
 
-async function pullAndMerge() {
+/** Baixa, junta com o que tem aqui e envia de volta. */
+async function syncNow() {
+  if (!token || !apiInfo || syncing) return;
+  clearTimeout(pushTimer);
   syncing = true;
+  updateBadge();
   try {
+    const before = JSON.stringify(data);
     const remote = await call('pull');
-    const merged = remote.data ? merge(JSON.parse(JSON.stringify(data)), remote.data) : data;
+    const merged = remote.data ? merge(JSON.parse(before), remote.data) : JSON.parse(before);
     replaceAll(merged);
     await call('push', { data: merged });
+    lastPull = Date.now();
+    lastSyncAt = Date.now();
+    syncError = '';
+    if (JSON.stringify(merged) !== before) syncedListeners.forEach((fn) => fn());
+  } catch (err) {
+    syncError = err.message;
+    if (err.status === 401) { setSession(null, null); location.reload(); }
   } finally {
     syncing = false;
+    updateBadge();
   }
 }
 
-// envia as mudanças para a nuvem alguns segundos depois de cada alteração
+async function pushNow() {
+  if (!token || !apiInfo) return;
+  if (syncing) { pushTimer = setTimeout(pushNow, 1000); return; }
+  try {
+    await call('push', { data });
+    lastSyncAt = Date.now();
+    syncError = '';
+  } catch (err) {
+    syncError = err.message;
+  }
+  updateBadge();
+}
+
+// cada mudança é enviada 1,5 s depois (juntando várias mudanças seguidas)
 onChange(() => {
   if (!token || !apiInfo || syncing) return;
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => call('push', { data }).catch(() => {}), 2500);
+  pushTimer = setTimeout(pushNow, 1500);
 });
+// voltou para o app (outra aba, desbloqueou o celular): pega o que mudou nos outros aparelhos
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && Date.now() - lastPull > 15000) syncNow();
+});
+setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 60000);
+addEventListener('online', () => syncNow());
 
-function renderAccount(root) {
-  if (!apiInfo) {
-    root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
-      <div class="card"><p>A conta e a sincronização entre celular e computador funcionam quando o site está publicado na <b>Hostinger</b> (com a pasta <code>api/</code> configurada).</p>
-      <p class="muted">Por enquanto suas cifras e seu progresso ficam salvos só neste navegador.</p></div></div>`;
-    return;
-  }
-  if (token) {
-    root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
-      <div class="card"><p>Você entrou como <b>${esc(email)}</b>.</p>
-      <p class="muted">Suas cifras, favoritas e progresso são sincronizados automaticamente entre os aparelhos em que você entrar.</p>
-      <div class="actions"><button type="button" class="primary" id="acSync">🔄 Sincronizar agora</button><button type="button" id="acLogout">Sair</button></div>
-      <p class="muted" id="acMsg"></p></div></div>`;
-    $('#acSync').addEventListener('click', async () => {
-      $('#acMsg').textContent = 'Sincronizando…';
-      try { await pullAndMerge(); $('#acMsg').textContent = 'Tudo sincronizado ✓'; } catch (e) { $('#acMsg').textContent = e.message; }
-    });
-    $('#acLogout').addEventListener('click', async () => {
-      await call('logout', {}).catch(() => {});
-      setToken(null);
-      email = '';
-      updateBadge();
-      renderAccount(root);
-    });
-    return;
-  }
-  root.innerHTML = `<div class="page narrow"><h1>Entrar</h1>
-    <form class="card form-stack" id="acForm">
-      <label>E-mail <input type="email" id="acEmail" required autocomplete="username"></label>
-      <label>Senha <input type="password" id="acPass" required minlength="8" autocomplete="current-password"></label>
-      <div class="actions">
-        <button type="submit" class="primary" value="login">Entrar</button>
-        ${apiInfo.registration ? '<button type="submit" value="register">Criar conta</button>' : ''}
+// ---------- telas ----------
+
+/** Tela de login (aparece no lugar do site enquanto você não entrar). */
+function renderLogin(root, onDone) {
+  const offline = apiInfo === null || (apiInfo === false && isPublished());
+  root.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card card">
+        <img src="icon.svg" alt="" width="64" height="64">
+        <h1>Cifra Viva</h1>
+        <p class="muted">Entre para ver suas músicas.</p>
+        <form class="form-stack" id="acForm">
+          <label>Nome de usuário <input id="acUser" required autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+          <label>Senha <input type="password" id="acPass" required minlength="8" autocomplete="current-password"></label>
+          <button type="submit" class="primary big" value="login">Entrar</button>
+          ${apiInfo?.registration ? '<button type="submit" value="register">Criar conta</button>' : ''}
+          <p class="muted" id="acMsg">${offline ? 'Não consegui falar com o servidor. Confira a internet.' : ''}</p>
+        </form>
       </div>
-      <p class="muted" id="acMsg">${apiInfo.registration ? 'Primeira vez? Preencha e clique em Criar conta (senha com 8+ caracteres).' : ''}</p>
-    </form></div>`;
+    </div>`;
   $('#acForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const action = e.submitter?.value === 'register' ? 'register' : 'login';
-    $('#acMsg').textContent = 'Aguarde…';
+    $('#acMsg').textContent = 'Entrando…';
     try {
-      const r = await call(action, { email: $('#acEmail').value.trim(), password: $('#acPass').value });
-      setToken(r.token);
-      email = r.email;
-      await pullAndMerge();
+      if (!apiInfo) await initAccount();
+      const r = await call(action, { username: $('#acUser').value.trim(), password: $('#acPass').value });
+      setSession(r.token, r.username);
+      await syncNow();
       updateBadge();
-      renderAccount(root);
+      onDone();
     } catch (err) {
       $('#acMsg').textContent = err.message;
     }
+  });
+  setTimeout(() => $('#acUser')?.focus(), 50);
+}
+
+/** Página "Conta" (depois de entrar). */
+function renderAccount(root) {
+  if (!apiInfo || !token) {
+    root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
+      <div class="card"><p>A conta e a sincronização funcionam quando o site está publicado na <b>Hostinger</b>.</p>
+      <p class="muted">Por enquanto suas cifras e seu progresso ficam salvos só neste navegador.</p></div></div>`;
+    return;
+  }
+  const t = lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '–';
+  root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
+    <div class="card"><p>Você entrou como <b>${esc(username)}</b>.</p>
+    <p class="muted">☁️ A sincronização é automática: tudo que você muda aqui aparece nos outros aparelhos em que você entrou (celular, computador…).
+    Última sincronização: <b id="acLast">${t}</b>.</p>
+    ${syncError ? `<p class="bad">⚠️ ${esc(syncError)}</p>` : ''}
+    <div class="actions"><button type="button" id="acLogout">Sair desta conta</button></div>
+    <p class="muted small-print">Ao sair, as cifras deste aparelho são apagadas daqui (continuam na sua conta e voltam quando você entrar de novo).</p></div></div>`;
+  $('#acLogout').addEventListener('click', async () => {
+    if (!confirm('Sair da conta neste aparelho?')) return;
+    clearTimeout(pushTimer);
+    await pushNow();
+    await call('logout', {}).catch(() => {});
+    setSession(null, null);
+    replaceAll({}); // limpa os dados deste aparelho (ficam guardados na conta)
+    location.hash = '#/';
+    location.reload();
   });
 }
 
@@ -3048,6 +3162,7 @@ const VIEWS = {
 };
 
 let current = null;
+let locked = false; // site publicado e ainda sem login: só mostra a tela de entrar
 
 function leave() {
   closePlayer();
@@ -3061,6 +3176,15 @@ function route() {
   const [path, query = ''] = hash.split('?');
   const [name, arg] = path.split('/');
   const params = new URLSearchParams(query);
+
+  document.body.classList.toggle('locked', locked);
+  if (locked) {
+    leave();
+    $('#view-page').hidden = false;
+    $('#view-player').hidden = true;
+    renderLogin($('#view-page'), () => { locked = false; route(); });
+    return;
+  }
 
   if (name === 'nova') { // abre o editor por cima da página atual
     history.replaceState(null, '', current ? '#/' + current : '#/');
@@ -3090,8 +3214,26 @@ addEventListener('hashchange', route);
 $('#sensitivity').value = data.prefs.sensitivity;
 $('#speed').value = data.prefs.speed;
 setFont(data.prefs.fontSize || 20);
-route();
-detectApi();
+
+// chegaram dados de outro aparelho: redesenha as listas (sem atrapalhar quem está tocando)
+onSynced(() => {
+  const name = (current || '').split(/[/?]/)[0];
+  if (['', 'musicas', 'repertorio'].includes(name)) route();
+});
+
+(async () => {
+  if (isPublished() && !isLoggedIn()) {
+    // publicado e sem login: confere a API antes de decidir se mostra a tela de entrar
+    $('#view-page').innerHTML = '<div class="login-wrap"><p class="muted">Carregando…</p></div>';
+    document.body.classList.add('locked');
+    await initAccount();
+    locked = needsLogin();
+    route();
+  } else {
+    route();
+    initAccount(); // confere a sessão e sincroniza em segundo plano
+  }
+})();
 
 // "instalar" no celular e funcionar sem internet quando publicado em https
 if (location.protocol === 'https:') {

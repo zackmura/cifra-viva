@@ -1,16 +1,32 @@
-// Conta e sincronização (celular <-> computador) usando a API em PHP + MySQL da Hostinger.
-// Sem a API (ex.: abrindo o arquivo direto ou no GitHub Pages) tudo continua só no navegador.
+// Conta (nome de usuário + senha) e sincronização automática entre aparelhos,
+// usando a API em PHP + MySQL da Hostinger.
+//  - Publicado (http/https com a API): só entra quem fez login.
+//  - Abrindo o arquivo direto no computador (sem API): funciona sem login, só neste navegador.
+//  - A sincronização é sozinha: baixa ao abrir/voltar para o app e a cada minuto,
+//    e envia logo depois de cada mudança.
 
 import { $, esc, data, onChange, replaceAll } from './store.js';
 
 const API = 'api/index.php';
 const TOKEN_KEY = 'cifraviva.token';
-let token = null;
-try { token = localStorage.getItem(TOKEN_KEY); } catch { /* sem armazenamento */ }
-let apiInfo = null; // { ok, registration } quando a API existe
-let email = '';
+const USER_KEY = 'cifraviva.user';
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch { /* sem armazenamento */ } },
+};
+
+let token = store.get(TOKEN_KEY);
+let username = store.get(USER_KEY) || '';
+let apiInfo = null; // { ok, registration } quando a API responde
 let pushTimer = 0;
 let syncing = false;
+let lastPull = 0;
+let lastSyncAt = 0;
+let syncError = '';
+const syncedListeners = [];
+
+/** Avisa quando chegaram dados novos da nuvem (para redesenhar a página). */
+export function onSynced(fn) { syncedListeners.push(fn); }
 
 async function call(action, body) {
   const res = await fetch(`${API}?a=${action}`, {
@@ -20,42 +36,60 @@ async function call(action, body) {
     cache: 'no-store',
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `Erro ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(json.error || `Erro ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return json;
 }
 
-export async function detectApi() {
-  if (!location.protocol.startsWith('http')) return null;
+function setSession(t, name) {
+  token = t;
+  username = name || '';
+  store.set(TOKEN_KEY, t);
+  store.set(USER_KEY, name);
+}
+
+export const isPublished = () => location.protocol.startsWith('http');
+export const isLoggedIn = () => !!token;
+/** Precisa mostrar a tela de login? (site publicado e sem login) */
+export const needsLogin = () => isPublished() && !token && apiInfo !== false;
+
+/**
+ * Descobre se a API existe e confere a sessão. Retorna quando já dá para decidir
+ * se mostra o site ou a tela de login.
+ */
+export async function initAccount() {
+  if (!isPublished()) { apiInfo = false; return; }
   try {
     const r = await call('ping');
-    apiInfo = r && r.ok === true ? r : null; // só vale se o PHP respondeu de verdade
+    apiInfo = r && r.ok === true ? r : false;
   } catch {
-    apiInfo = null;
+    apiInfo = token ? null : false; // sem internet: quem já entrou continua usando
   }
   if (apiInfo && token) {
     try {
-      email = (await call('me')).email;
-      await pullAndMerge();
-    } catch {
-      setToken(null);
+      username = (await call('me')).username;
+      store.set(USER_KEY, username);
+      syncNow();
+    } catch (err) {
+      if (err.status === 401) setSession(null, null); // sessão expirou
     }
   }
   updateBadge();
-  return apiInfo;
-}
-
-function setToken(t) {
-  token = t;
-  try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch { /* sem armazenamento */ }
 }
 
 function updateBadge() {
   const a = $('#accountLink');
   if (!a) return;
-  a.hidden = !apiInfo;
-  a.textContent = token ? '👤 ' + (email.split('@')[0] || 'Conta') : '👤 Entrar';
-  a.classList.toggle('on', !!token);
+  a.hidden = !apiInfo || !token;
+  const t = lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+  a.innerHTML = `${syncing ? '⟳' : syncError ? '⚠️' : '☁️'} ${esc(username)}`;
+  a.title = syncing ? 'Sincronizando…' : syncError ? `Não sincronizou: ${syncError}` : t ? `Sincronizado às ${t}` : '';
 }
+
+// ---------- sincronização ----------
 
 /** Junta os dados da nuvem com os do aparelho (nada se perde). */
 function merge(local, remote) {
@@ -94,74 +128,119 @@ function merge(local, remote) {
   };
 }
 
-async function pullAndMerge() {
+/** Baixa, junta com o que tem aqui e envia de volta. */
+export async function syncNow() {
+  if (!token || !apiInfo || syncing) return;
+  clearTimeout(pushTimer);
   syncing = true;
+  updateBadge();
   try {
+    const before = JSON.stringify(data);
     const remote = await call('pull');
-    const merged = remote.data ? merge(JSON.parse(JSON.stringify(data)), remote.data) : data;
+    const merged = remote.data ? merge(JSON.parse(before), remote.data) : JSON.parse(before);
     replaceAll(merged);
     await call('push', { data: merged });
+    lastPull = Date.now();
+    lastSyncAt = Date.now();
+    syncError = '';
+    if (JSON.stringify(merged) !== before) syncedListeners.forEach((fn) => fn());
+  } catch (err) {
+    syncError = err.message;
+    if (err.status === 401) { setSession(null, null); location.reload(); }
   } finally {
     syncing = false;
+    updateBadge();
   }
 }
 
-// envia as mudanças para a nuvem alguns segundos depois de cada alteração
+async function pushNow() {
+  if (!token || !apiInfo) return;
+  if (syncing) { pushTimer = setTimeout(pushNow, 1000); return; }
+  try {
+    await call('push', { data });
+    lastSyncAt = Date.now();
+    syncError = '';
+  } catch (err) {
+    syncError = err.message;
+  }
+  updateBadge();
+}
+
+// cada mudança é enviada 1,5 s depois (juntando várias mudanças seguidas)
 onChange(() => {
   if (!token || !apiInfo || syncing) return;
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => call('push', { data }).catch(() => {}), 2500);
+  pushTimer = setTimeout(pushNow, 1500);
 });
+// voltou para o app (outra aba, desbloqueou o celular): pega o que mudou nos outros aparelhos
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && Date.now() - lastPull > 15000) syncNow();
+});
+setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 60000);
+addEventListener('online', () => syncNow());
 
-export function renderAccount(root) {
-  if (!apiInfo) {
-    root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
-      <div class="card"><p>A conta e a sincronização entre celular e computador funcionam quando o site está publicado na <b>Hostinger</b> (com a pasta <code>api/</code> configurada).</p>
-      <p class="muted">Por enquanto suas cifras e seu progresso ficam salvos só neste navegador.</p></div></div>`;
-    return;
-  }
-  if (token) {
-    root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
-      <div class="card"><p>Você entrou como <b>${esc(email)}</b>.</p>
-      <p class="muted">Suas cifras, favoritas e progresso são sincronizados automaticamente entre os aparelhos em que você entrar.</p>
-      <div class="actions"><button type="button" class="primary" id="acSync">🔄 Sincronizar agora</button><button type="button" id="acLogout">Sair</button></div>
-      <p class="muted" id="acMsg"></p></div></div>`;
-    $('#acSync').addEventListener('click', async () => {
-      $('#acMsg').textContent = 'Sincronizando…';
-      try { await pullAndMerge(); $('#acMsg').textContent = 'Tudo sincronizado ✓'; } catch (e) { $('#acMsg').textContent = e.message; }
-    });
-    $('#acLogout').addEventListener('click', async () => {
-      await call('logout', {}).catch(() => {});
-      setToken(null);
-      email = '';
-      updateBadge();
-      renderAccount(root);
-    });
-    return;
-  }
-  root.innerHTML = `<div class="page narrow"><h1>Entrar</h1>
-    <form class="card form-stack" id="acForm">
-      <label>E-mail <input type="email" id="acEmail" required autocomplete="username"></label>
-      <label>Senha <input type="password" id="acPass" required minlength="8" autocomplete="current-password"></label>
-      <div class="actions">
-        <button type="submit" class="primary" value="login">Entrar</button>
-        ${apiInfo.registration ? '<button type="submit" value="register">Criar conta</button>' : ''}
+// ---------- telas ----------
+
+/** Tela de login (aparece no lugar do site enquanto você não entrar). */
+export function renderLogin(root, onDone) {
+  const offline = apiInfo === null || (apiInfo === false && isPublished());
+  root.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card card">
+        <img src="icon.svg" alt="" width="64" height="64">
+        <h1>Cifra Viva</h1>
+        <p class="muted">Entre para ver suas músicas.</p>
+        <form class="form-stack" id="acForm">
+          <label>Nome de usuário <input id="acUser" required autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+          <label>Senha <input type="password" id="acPass" required minlength="8" autocomplete="current-password"></label>
+          <button type="submit" class="primary big" value="login">Entrar</button>
+          ${apiInfo?.registration ? '<button type="submit" value="register">Criar conta</button>' : ''}
+          <p class="muted" id="acMsg">${offline ? 'Não consegui falar com o servidor. Confira a internet.' : ''}</p>
+        </form>
       </div>
-      <p class="muted" id="acMsg">${apiInfo.registration ? 'Primeira vez? Preencha e clique em Criar conta (senha com 8+ caracteres).' : ''}</p>
-    </form></div>`;
+    </div>`;
   $('#acForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const action = e.submitter?.value === 'register' ? 'register' : 'login';
-    $('#acMsg').textContent = 'Aguarde…';
+    $('#acMsg').textContent = 'Entrando…';
     try {
-      const r = await call(action, { email: $('#acEmail').value.trim(), password: $('#acPass').value });
-      setToken(r.token);
-      email = r.email;
-      await pullAndMerge();
+      if (!apiInfo) await initAccount();
+      const r = await call(action, { username: $('#acUser').value.trim(), password: $('#acPass').value });
+      setSession(r.token, r.username);
+      await syncNow();
       updateBadge();
-      renderAccount(root);
+      onDone();
     } catch (err) {
       $('#acMsg').textContent = err.message;
     }
+  });
+  setTimeout(() => $('#acUser')?.focus(), 50);
+}
+
+/** Página "Conta" (depois de entrar). */
+export function renderAccount(root) {
+  if (!apiInfo || !token) {
+    root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
+      <div class="card"><p>A conta e a sincronização funcionam quando o site está publicado na <b>Hostinger</b>.</p>
+      <p class="muted">Por enquanto suas cifras e seu progresso ficam salvos só neste navegador.</p></div></div>`;
+    return;
+  }
+  const t = lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '–';
+  root.innerHTML = `<div class="page narrow"><h1>Conta</h1>
+    <div class="card"><p>Você entrou como <b>${esc(username)}</b>.</p>
+    <p class="muted">☁️ A sincronização é automática: tudo que você muda aqui aparece nos outros aparelhos em que você entrou (celular, computador…).
+    Última sincronização: <b id="acLast">${t}</b>.</p>
+    ${syncError ? `<p class="bad">⚠️ ${esc(syncError)}</p>` : ''}
+    <div class="actions"><button type="button" id="acLogout">Sair desta conta</button></div>
+    <p class="muted small-print">Ao sair, as cifras deste aparelho são apagadas daqui (continuam na sua conta e voltam quando você entrar de novo).</p></div></div>`;
+  $('#acLogout').addEventListener('click', async () => {
+    if (!confirm('Sair da conta neste aparelho?')) return;
+    clearTimeout(pushTimer);
+    await pushNow();
+    await call('logout', {}).catch(() => {});
+    setSession(null, null);
+    replaceAll({}); // limpa os dados deste aparelho (ficam guardados na conta)
+    location.hash = '#/';
+    location.reload();
   });
 }
