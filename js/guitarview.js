@@ -62,7 +62,8 @@ function neckSVG() {
 }
 
 export class GuitarView {
-  constructor(container, onTap) {
+  /** onPick(corda, casa) é chamado quando você toca numa corda do desenho. */
+  constructor(container, onPick) {
     container.innerHTML = neckSVG();
     this.svg = container.querySelector('svg');
     this.fingers = this.svg.querySelector('#gv-fingers');
@@ -70,7 +71,63 @@ export class GuitarView {
     this.inlays = this.svg.querySelector('#gv-inlays');
     this.numbers = this.svg.querySelector('#gv-numbers');
     this.strings = [...this.svg.querySelectorAll('.gv-string')];
-    this.svg.addEventListener('pointerdown', (e) => { e.preventDefault(); onTap?.(); });
+    this.start = 1;
+    this.drawWindow(1);
+    this.svg.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const p = this.svg.createSVGPoint();
+      p.x = e.clientX;
+      p.y = e.clientY;
+      const { x, y } = p.matrixTransform(this.svg.getScreenCTM().inverse());
+      if (y < TOP - 6 || y > BOTTOM + 6) return;
+      const s = Math.max(0, Math.min(5, Math.round((y - SY(0)) / 20)));
+      let fret = 0;
+      if (x >= NUT) {
+        let k = 0;
+        while (k < FRETS - 1 && x > fretX(k + 1)) k++;
+        fret = this.start + k;
+      }
+      this.ripple(s, fret);
+      onPick?.(s, fret);
+    });
+  }
+
+  /** Desenha marcações e números das casas a partir da casa `start`. */
+  drawWindow(start) {
+    this.start = start;
+    const mid = (TOP + BOTTOM) / 2;
+    this.inlays.innerHTML = [3, 5, 7, 9, 12, 15].filter((f) => f >= start && f < start + FRETS).map((f) => (f === 12
+      ? `<circle cx="${CX(f, start)}" cy="${mid - 26}" r="6" fill="url(#gv-pearl)"/><circle cx="${CX(f, start)}" cy="${mid + 26}" r="6" fill="url(#gv-pearl)"/>`
+      : `<circle cx="${CX(f, start)}" cy="${mid}" r="7" fill="url(#gv-pearl)"/>`)).join('');
+    this.numbers.innerHTML = Array.from({ length: FRETS }, (_, i) =>
+      `<text x="${CX(start + i, start)}" y="${BOTTOM + 19}" text-anchor="middle" class="gv-num">${start + i}</text>`).join('');
+  }
+
+  ripple(s, fret) {
+    const x = fret === 0 ? NUT - 26 : CX(fret, this.start);
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('cx', x);
+    c.setAttribute('cy', SY(s));
+    c.setAttribute('r', 12);
+    c.setAttribute('class', 'gv-ripple');
+    this.svg.appendChild(c);
+    setTimeout(() => c.remove(), 500);
+    this.strum({ frets: this.strings.map((_, i) => (i === s ? fret : -1)) });
+  }
+
+  /** Mostra a próxima nota da tablatura (piscando) e as seguintes, mais claras. */
+  showNotes(list, upcoming = []) {
+    this.marks.innerHTML = '';
+    const all = [...list, ...upcoming].filter((n) => n.fret > 0);
+    const maxF = all.length ? Math.max(...all.map((n) => n.fret)) : 0;
+    const minF = all.length ? Math.min(...all.map((n) => n.fret)) : 1;
+    this.drawWindow(maxF <= FRETS ? 1 : Math.max(1, Math.min(minF, maxF - FRETS + 1)));
+    const dot = (n, cls) => (n.fret === 0
+      ? `<circle cx="${NUT - 26}" cy="${SY(n.s)}" r="10" class="${cls} open"/>`
+      : n.fret < this.start || n.fret >= this.start + FRETS ? ''
+        : `<circle cx="${CX(n.fret, this.start)}" cy="${SY(n.s)}" r="12" class="${cls}"/>`
+          + `<text x="${CX(n.fret, this.start)}" y="${SY(n.s) + 5}" text-anchor="middle" class="gv-finger">${n.fret}</text>`);
+    this.fingers.innerHTML = upcoming.map((n) => dot(n, 'gv-ghost')).join('') + list.map((n) => dot(n, 'gv-dot gv-target')).join('');
   }
 
   /** Mostra no braço onde ficam os dedos da forma `v`. */
@@ -81,13 +138,7 @@ export class GuitarView {
     const pressed = v.frets.filter((f) => f > 0);
     const maxF = pressed.length ? Math.max(...pressed) : 0;
     const start = maxF <= FRETS ? 1 : Math.min(...pressed);
-
-    const mid = (TOP + BOTTOM) / 2;
-    this.inlays.innerHTML = [3, 5, 7, 9, 12, 15].filter((f) => f >= start && f < start + FRETS).map((f) => (f === 12
-      ? `<circle cx="${CX(f, start)}" cy="${mid - 26}" r="6" fill="url(#gv-pearl)"/><circle cx="${CX(f, start)}" cy="${mid + 26}" r="6" fill="url(#gv-pearl)"/>`
-      : `<circle cx="${CX(f, start)}" cy="${mid}" r="7" fill="url(#gv-pearl)"/>`)).join('');
-    this.numbers.innerHTML = Array.from({ length: FRETS }, (_, i) =>
-      `<text x="${CX(start + i, start)}" y="${BOTTOM + 19}" text-anchor="middle" class="gv-num">${start + i}</text>`).join('');
+    this.drawWindow(start);
 
     const out = [];
     v.frets.forEach((f, s) => {

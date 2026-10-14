@@ -63,9 +63,37 @@ function sectionName(line) {
   return null;
 }
 
+// ---------- tablatura ----------
+// Linha de tablatura: "e|---0---3---|", "B|-1-----|", "|--2--" ... (com pelo menos 3 traços)
+const TAB_LINE = /^\s*([eBGDAEbgda])?\s*[|:]?[-\d|:hpbrsx~/\\().*=]+\s*$/;
+const isTabLine = (l) => TAB_LINE.test(l) && (l.match(/-/g) || []).length >= 3;
+
+/** Lê 6 linhas de tablatura (1ª corda em cima). Retorna as notas por coluna. */
+function parseTab(lines) {
+  const body = lines.map((l) => {
+    const m = /^\s*([eBGDAEbgda])?\s*([|:]?)/.exec(l);
+    return { label: (m[1] || '').trim(), text: l.slice(m[0].length).trimEnd() };
+  });
+  const columns = new Map(); // coluna -> [{s, fret}]
+  body.forEach((line, k) => {
+    const s = 5 - k; // 1ª linha = 1ª corda (mi agudo) = índice 5
+    const re = /\d+/g;
+    let m;
+    while ((m = re.exec(line.text))) {
+      const fret = parseInt(m[0], 10);
+      if (fret > 24) continue;
+      if (!columns.has(m.index)) columns.set(m.index, []);
+      columns.get(m.index).push({ s, fret, len: m[0].length });
+    }
+  });
+  const notes = [...columns.entries()].sort((a, b) => a[0] - b[0]).map(([col, list]) => ({ col, list }));
+  return { lines: body, notes };
+}
+
 /**
  * Retorna linhas do tipo:
  *  {type:'section', text} | {type:'lyric', segments:[{chord, text}]} | {type:'chords', chords:[]} | {type:'blank'}
+ *  | {type:'tab', lines:[{label, text}], notes:[{col, list:[{s, fret, len}]}]}
  */
 export function parseSheet(text) {
   const lines = text.replace(/\r/g, '').replace(/\t/g, '    ').split('\n');
@@ -74,6 +102,13 @@ export function parseSheet(text) {
     let line = lines[i];
     if (!line.trim()) {
       if (rows.length && rows[rows.length - 1].type !== 'blank') rows.push({ type: 'blank' });
+      continue;
+    }
+
+    // bloco de tablatura: 6 linhas seguidas
+    if (isTabLine(line) && i + 5 < lines.length && lines.slice(i, i + 6).every(isTabLine)) {
+      rows.push({ type: 'tab', ...parseTab(lines.slice(i, i + 6)) });
+      i += 5;
       continue;
     }
 

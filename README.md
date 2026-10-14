@@ -8,11 +8,19 @@ Site de cifras que **escuta o seu violão** e rola a letra sozinho conforme voc�
 - Transposição de tom, tamanho da letra, rolagem por tempo, cifras salvas no navegador.
 - Feito para celular: tela fica ligada enquanto você toca e dá para "instalar" na tela inicial.
 
-## Como abrir
+## O que tem
+- **Início** com progresso (dias seguidos, minutos, músicas dominadas), gêneros e ferramentas.
+- **Catálogo** com busca e filtros por gênero, nível e tipo (com letra, só acordes, tablatura).
+- **Modo jogo** (microfone ou violão virtual): só avança quando você acerta; batidas no ritmo não contam como erro.
+- **Tablatura**: lida da cifra, seguida nota a nota; no violão virtual dá para tocar direto nas cordas do braço.
+- **Metrônomo** com a batida sugerida e medição de quantas batidas caíram no tempo.
+- **Afinador**, **treino de trocas** (acordes por minuto) e **importar** (colar cifra ou gerar a cifra de um áudio).
+- **Conta e sincronização** entre celular e computador (PHP + MySQL na Hostinger).
 
-- **Mais fácil:** dê dois cliques em `index.html`.
-- **Com servidor local** (recomendado para usar o microfone): `node server.js` e abra http://localhost:5173
-- **Online:** publique no GitHub Pages (abaixo) e abra o link no celular.
+## Como abrir
+- **Mais fácil:** dê dois cliques em  (conta/sincronização só funcionam publicado).
+- **Servidor local:**  e abra http://localhost:5173
+- **Hostinger:** veja [HOSTINGER.md](HOSTINGER.md).
 
 ## Formato das cifras
 
@@ -44,4 +52,11 @@ node build.js
 | `js/diagram.js` | Desenho do acorde (SVG) |
 | `js/guitarview.js` | Desenho do violão virtual |
 | `js/synth.js` | Som do violão sintetizado |
-| `js/app.js` | Interface |
+| `js/store.js` | Dados salvos: cifras, favoritas, histórico, progresso |
+| `js/player.js` | Página da música e modo jogo |
+| `js/pages.js` | Início, catálogo, repertório |
+| `js/tools.js` | Metrônomo, afinador, treino de trocas |
+| `js/importer.js` | Colar cifra e áudio → cifra |
+| `js/account.js` | Conta e sincronização |
+| `js/app.js` | Navegação entre páginas |
+| `api/index.php` | API (Hostinger) |

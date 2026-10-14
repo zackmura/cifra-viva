@@ -2,3 +2,5 @@ node_modules/
 .claude/
 .DS_Store
 Thumbs.db
+api/config.php
+cifra-viva-hostinger.zip

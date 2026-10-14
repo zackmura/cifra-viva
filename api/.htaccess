@@ -1,0 +1,5 @@
+# Ninguém acessa os arquivos de configuração pela internet
+<FilesMatch "^config(\.sample)?\.php$">
+  Require all denied
+</FilesMatch>
+Options -Indexes

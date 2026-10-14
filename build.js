@@ -4,12 +4,16 @@
 const fs = require('fs');
 const path = require('path');
 
-const ORDER = ['chords', 'sheet', 'audio', 'follower', 'songs', 'guitar', 'diagram', 'synth', 'guitarview', 'app'];
+const ORDER = [
+  'chords', 'sheet', 'audio', 'follower', 'songs', 'guitar', 'diagram', 'synth', 'guitarview',
+  'store', 'tools', 'player', 'pages', 'importer', 'account', 'app',
+];
 
 const body = ORDER.map((name) => {
   const src = fs.readFileSync(path.join(__dirname, 'js', name + '.js'), 'utf8')
-    .replace(/^import .*;\r?\n/gm, '')
-    .replace(/^export (?=const|function|class|let)/gm, '');
+    .replace(/^import[\s\S]*?from\s+['"][^'"]+['"];?\r?\n/gm, '')
+    .replace(/^export \{[^}]*\};?\r?\n/gm, '')
+    .replace(/^export (?=const|function|class|let|async)/gm, '');
   return `// ===== js/${name}.js =====\n${src}`;
 }).join('\n');
 

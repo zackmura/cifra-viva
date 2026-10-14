@@ -1,0 +1,18 @@
+# Hostinger: sempre usar https (o microfone só funciona em https)
+RewriteEngine On
+RewriteCond %{HTTPS} off
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+Options -Indexes
+
+# Arquivos de desenvolvimento não precisam ficar públicos
+<FilesMatch "^(server|build)\.js$|\.md$">
+  Require all denied
+</FilesMatch>
+
+# O app sempre busca a versão nova do código
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|js|css|webmanifest)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
